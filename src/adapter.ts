@@ -1,0 +1,330 @@
+/**
+ * Command Code Go adapter: a harness `LlmAdapter` whose stream transport is
+ * Command Code's private `/alpha/generate` gateway, which is the only
+ * endpoint a Go-plan subscription can call (the OpenAI-compatible Provider
+ * API answers 403 for Go).
+ *
+ * The adapter is transport-only: connection facts (base URL, catalog,
+ * reasoning defaults) arrive through a thunk resolved once per operation and
+ * the bearer key through a per-request resolver, so the registering plugin
+ * owns validation, layering, and credential policy. Model metadata — the
+ * scanned Go catalog — flows through `listModels()` / `resolveModel()`.
+ *
+ * @module commandcode-go/adapter
+ */
+
+import {
+  attributionHeaders,
+  CONTEXT_WINDOW_EXCEEDED_CODE,
+  isContextWindowExceededError,
+  LlmAdapter,
+  LlmError,
+  ReasoningEffortId,
+} from '@deepseek-ai/dsh-llm'
+import type {
+  GenerateOptions,
+  LlmModelInfo,
+  LlmModelReasoningInfo,
+  LlmProviderInfo,
+  LlmResolvedModelInfo,
+  ResolvedRetryPolicy,
+  StreamChunk,
+} from '@deepseek-ai/dsh-llm'
+import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
+import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
+import { buildRequest, CC_VERSION, eventToChunks, gatewayErrorMessage, newThreadId, parseEventStream } from './protocol.js'
+
+/** One catalog model advertised by the adapter. */
+export interface CommandCodeGoModel {
+  /** Wire model id accepted by the gateway. */
+  id: string
+  /** Selector label; defaults to {@link id}. */
+  name?: string
+  /** Known combined request/response context capacity, when disclosed. */
+  contextWindow?: number
+  /** Per-request output cap. */
+  maxTokens?: number
+  /** Reasoning-effort ids the gateway accepts for this model, in display order. */
+  efforts?: string[]
+}
+
+/** Validated connection facts for one operation. */
+export interface CommandCodeGoConnectionOptions {
+  /** Credential reference resolved per request. */
+  apiKeyEnv: CredentialRef
+  /** Gateway base URL; `/alpha/generate` is appended. */
+  baseURL: string
+  /** Adapter-level reasoning effort default, when configured. */
+  reasoningEffort?: string
+  /** Default per-request output cap. */
+  maxTokens: number
+  /** Positive context capacity used when the selected model has no exact value. */
+  defaultContextWindow: number
+  /** Advisory models; requests remain unrestricted. */
+  models: readonly CommandCodeGoModel[]
+  /** Maximum provider idle time while one stream read is outstanding. */
+  streamIdleTimeoutMs: number
+  /** Provider-owned model-request retry policy, already resolved. */
+  retryPolicy: ResolvedRetryPolicy
+}
+
+/** Constructor options for {@link CommandCodeGoAdapter}. */
+export interface CommandCodeGoAdapterOptions {
+  /** Current validated connection facts; called once per operation. */
+  options: () => CommandCodeGoConnectionOptions
+  /** Resolve the bearer token for one request; throws `MISSING_CREDENTIAL` when unavailable. */
+  resolveApiKey: () => Promise<string>
+}
+
+/** Default maximum idle interval while an adapter stream read is outstanding. */
+export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
+/** Default combined request/response context capacity. */
+export const DEFAULT_CONTEXT_WINDOW = 1_000_000
+/** Default per-request output-token cap. */
+export const DEFAULT_MAX_TOKENS = 64_000
+
+const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
+const OFF_REASONING_EFFORT = ReasoningEffortId('off')
+const HIGH_REASONING_EFFORT = ReasoningEffortId('high')
+const MAX_REASONING_EFFORT = ReasoningEffortId('max')
+
+/** Effort labels in the gateway's own vocabulary, for selector display. */
+const EFFORT_LABELS: Readonly<Record<string, string>> = {
+  off: 'Off',
+  minimal: 'Minimal',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'X-High',
+  max: 'Max',
+}
+
+function effortInfo(effort: string): { id: ReturnType<typeof ReasoningEffortId>, name: string } {
+  return { id: ReasoningEffortId(effort), name: EFFORT_LABELS[effort] ?? effort }
+}
+
+function modelInfo(provider: string, model: CommandCodeGoModel): LlmModelInfo {
+  return {
+    provider,
+    id: model.id,
+    name: model.name ?? model.id,
+    inputModalities: ['text'],
+  }
+}
+
+/**
+ * Build the reasoning-effort selector for one model. Models whose effort
+ * support is known expose exactly their supported levels (plus `off`); models
+ * without metadata let the gateway choose reasoning depth, so no `reasoning`
+ * block is advertised and requests leave `reasoning_effort` unset.
+ *
+ * The default effort always lands in the model's supported set — the harness
+ * rejects a default the model does not advertise. `high` is preferred when
+ * supported; otherwise the highest advertised level (the catalog lists
+ * efforts ascending) is used. An explicitly configured plugin default wins
+ * when it is supported by the model.
+ */
+function reasoningFor(
+  model: CommandCodeGoModel | undefined,
+  configuredEffort: string | undefined,
+): LlmModelReasoningInfo | undefined {
+  const efforts = model?.efforts
+  if (efforts === undefined || efforts.length === 0) return undefined
+  const selectable = [
+    { id: OFF_REASONING_EFFORT, name: EFFORT_LABELS.off },
+    ...efforts.map(effortInfo),
+  ]
+  const configured = configuredEffort === 'off'
+    ? OFF_REASONING_EFFORT
+    : configuredEffort === 'max'
+      ? MAX_REASONING_EFFORT
+      : configuredEffort === 'high'
+        ? HIGH_REASONING_EFFORT
+        : undefined
+  let defaultEffort = configured
+  if (defaultEffort !== undefined) {
+    const supported = efforts.some((effort) => ReasoningEffortId(effort) === defaultEffort)
+    if (!supported) defaultEffort = undefined
+  }
+  if (defaultEffort === undefined) {
+    defaultEffort = efforts.includes('high')
+      ? HIGH_REASONING_EFFORT
+      : ReasoningEffortId(efforts[efforts.length - 1])
+  }
+  return { efforts: selectable, defaultEffort }
+}
+
+/**
+ * Command Code Go adapter. One instance serves every model in the scanned Go
+ * catalog; the harness model id IS the gateway wire model id.
+ */
+export class CommandCodeGoAdapter extends LlmAdapter {
+  private readonly config: CommandCodeGoAdapterOptions
+
+  constructor(config: CommandCodeGoAdapterOptions) {
+    super()
+    this.config = config
+  }
+
+  override providerInfo(provider: string): LlmProviderInfo {
+    return { id: provider, name: 'Command Code Go' }
+  }
+
+  override providerRetryPolicy(_provider: string): ResolvedRetryPolicy {
+    return this.config.options().retryPolicy
+  }
+
+  override listModels(provider: string): Promise<readonly LlmModelInfo[]> {
+    return Promise.resolve(this.config.options().models.map(model => modelInfo(provider, model)))
+  }
+
+  override resolveModel(
+    provider: string,
+    model: string,
+    _signal?: AbortSignal,
+  ): Promise<LlmResolvedModelInfo> {
+    const connection = this.config.options()
+    const configured = connection.models.find(entry => entry.id === model)
+    const contextWindow = configured?.contextWindow ?? connection.defaultContextWindow
+    const reasoning = reasoningFor(configured, connection.reasoningEffort)
+    return Promise.resolve({
+      ...configured === undefined
+        ? { provider, id: model, name: model, inputModalities: ['text' as const] }
+        : modelInfo(provider, configured),
+      context: { contextWindow },
+      defaultMaxTokens: configured?.maxTokens ?? connection.maxTokens,
+      ...reasoning === undefined ? {} : { reasoning },
+    })
+  }
+
+  async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const connection = this.config.options()
+    const apiKey = await this.config.resolveApiKey()
+    const consumer = new AbortController()
+    const upstream = options.signal === undefined
+      ? consumer.signal
+      : AbortSignal.any([options.signal, consumer.signal])
+    using watchdog = idleWatchdog(upstream, connection.streamIdleTimeoutMs, STREAM_IDLE_TIMEOUT_CODE)
+    const iterator = this.request(
+      options,
+      watchdog.signal,
+      connection,
+      apiKey,
+    )[Symbol.asyncIterator]()
+    let exhausted = false
+    try {
+      while (true) {
+        const result = await watchdog.next(iterator)
+        if (result.done) {
+          exhausted = true
+          return
+        }
+        yield result.value
+      }
+    } catch (error: unknown) {
+      if (timeoutOf(watchdog.signal, STREAM_IDLE_TIMEOUT_CODE) !== undefined) {
+        throw new LlmError(
+          `Command Code stream idle timeout after ${connection.streamIdleTimeoutMs}ms`,
+          'TIMEOUT',
+          { cause: error },
+        )
+      }
+      if (options.signal?.aborted) {
+        throw new LlmError('Command Code request aborted by caller', 'ABORTED', { cause: error })
+      }
+      if (error instanceof LlmError) throw error
+      throw new LlmError('Command Code /alpha/generate stream failed', 'TRANSPORT', { cause: error })
+    } finally {
+      consumer.abort('Command Code stream consumer stopped')
+      if (!exhausted && iterator.return !== undefined) {
+        try {
+          await iterator.return()
+        } catch (_abortedTransportTeardown) {
+          // The consumer controller already owns termination; a return-time abort cannot add a second outcome.
+        }
+      }
+    }
+  }
+
+  private async * request(
+    options: GenerateOptions,
+    signal: AbortSignal,
+    connection: CommandCodeGoConnectionOptions,
+    apiKey: string,
+  ): AsyncIterable<StreamChunk> {
+    const body = buildRequest(options)
+    const payload = JSON.stringify(body)
+    const headers: Record<string, string> = {
+      'authorization': `Bearer ${apiKey}`,
+      'content-type': 'application/json',
+      'x-command-code-version': CC_VERSION,
+      'x-cli-environment': 'production',
+      'x-co-flag': 'false',
+      ...attributionHeaders(),
+    }
+
+    let response: Response
+    try {
+      response = await fetch(`${connection.baseURL}/alpha/generate`, {
+        method: 'POST',
+        headers,
+        body: payload,
+        signal,
+      })
+    } catch (error: unknown) {
+      if (signal.aborted) throw error
+      throw new LlmError(
+        `Command Code request to ${connection.baseURL} failed`,
+        'TRANSPORT',
+        { cause: error },
+      )
+    }
+
+    if (!response.ok) {
+      const raw = await response.text().catch(() => '')
+      const message = gatewayErrorMessage(raw) ?? `Command Code API error (HTTP ${response.status})`
+      throw new LlmError(
+        `${message} [model=${options.model}]`,
+        httpErrorCode(response.status, raw),
+        { status: response.status },
+      )
+    }
+    if (!response.body) {
+      throw new LlmError('Command Code returned no response body', 'EMPTY_RESPONSE')
+    }
+
+    const state = { blockIndex: 0 }
+    for await (const event of parseEventStream(response.body)) {
+      // Each distinct content stream (text / reasoning / tool-call) opens its
+      // own block index in arrival order.
+      if (event.type === 'text-start' || event.type === 'reasoning-start' || event.type === 'tool-call') {
+        state.blockIndex += 1
+      }
+      yield* eventToChunks(event, state)
+      if (event.type === 'finish-step') return
+    }
+    // Gateway closed without a finish-step: treat as truncated.
+    throw new LlmError('Command Code stream ended without finish-step', 'STREAM_CLOSED')
+  }
+}
+
+/** Map a gateway HTTP status / error body to a stable harness LlmError code. */
+function httpErrorCode(status: number, body: string): string {
+  if (status === 401 || status === 403) {
+    // MODEL_NOT_IN_PLAN is a plan/permission failure, not a credential one:
+    // the key is fine, the selected model is above the Go tier.
+    if (body.includes('MODEL_NOT_IN_PLAN')) return 'PERMISSION'
+    return 'AUTH'
+  }
+  if (status === 429) return 'RATE_LIMIT'
+  if (status === 400) {
+    if (isContextWindowExceededError(body)) return CONTEXT_WINDOW_EXCEEDED_CODE
+    return 'INVALID_REQUEST'
+  }
+  if (status >= 500) return 'SERVER'
+  return `HTTP_${status}`
+}
+
+// Keep `newThreadId` reachable for future streaming-id wiring (some gateway
+// revisions expect the threadId echoed in follow-up requests).
+export { newThreadId }

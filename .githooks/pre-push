@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# pre-push hook: 推送版本 tag 前自动 build 并校验版本一致。
+# 失败则中止推送，保证推出去的 tag 和 lib/ 都是可发布的。
+set -euo pipefail
+
+# 解析被推送的引用，取出版本 tag 的版本号（兼容 v0.1.1 与 0.1.1 两种前缀）
+pushed_ver=""
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$local_ref" in
+    refs/tags/v*) pushed_ver="${local_ref#refs/tags/v}" ;;
+    refs/tags/[0-9]*) pushed_ver="${local_ref#refs/tags/}" ;;
+  esac
+done
+
+# 没有版本 tag，直接放行（普通分支推送不干预）
+if [[ -z "$pushed_ver" ]]; then
+  exit 0
+fi
+
+echo "> [pre-push] 检测到版本 tag: ${pushed_ver}"
+
+# 1. 自动构建
+echo "> [pre-push] 运行 npm run build ..."
+npm run build
+
+# 2. 校验 tag 版本与 package.json 一致
+pkg_version="$(node -p "require('./package.json').version")"
+if [[ "$pushed_ver" != "$pkg_version" ]]; then
+  echo "!! [pre-push] tag ${pushed_ver} 与 package.json version ${pkg_version} 不一致，中止推送。" >&2
+  exit 1
+fi
+
+echo "> [pre-push] OK: ${pushed_ver} == package.json v${pkg_version}，lib/ 已重新构建。"
