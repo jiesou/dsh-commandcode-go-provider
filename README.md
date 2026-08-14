@@ -1,4 +1,4 @@
-# @jiesou/dsh-commandcode-go-provider
+# dsh-commandcode-go-provider
 
 Command Code Go API provider for dsh.
 
