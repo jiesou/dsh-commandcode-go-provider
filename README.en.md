@@ -1,8 +1,6 @@
-<h1 align="center">dsh-commandcode-go-provider</h1>
+# dsh-commandcode-go-provider
 
-<p align="center">
-Bring Command Code Go / GOAT / Pro Plan subscriptions into DSH, with an auto-syncing model list. Plug in and go.
-</p>
+Command Code Go API provider for dsh.
 
 [简体中文](README.md)
 
@@ -11,7 +9,13 @@ Command Code subscriptions come in two flavors:
 1. **Provider API**: standard OpenAI-compatible endpoints that plug into any agent harness directly, no third-party plugin needed.
 2. **Go / GOAT / Pro Plan**: calling the Provider API returns `403 upgrade_required`; these plans can only be used through Command Code's private CLI gateway `/alpha/generate` (vendor lock-in).
 
-This plugin solves the second case: it streams over `/alpha/generate` through DSH's native `LlmAdapter`, letting Go / GOAT / Pro Plan users use their subscribed models directly inside DSH. Models are **never hardcoded** — the plugin periodically fetches the live catalog from `/provider/v1/models` and merges each model's Reasoning Effort support from the official CLI catalog (CDN).
+This plugin solves the second case: it streams over `/alpha/generate` through DSH's native `LlmAdapter`, letting Go / GOAT / Pro Plan users use their subscribed models directly inside DSH. Models are **never hardcoded** — the plugin periodically fetches the live catalog from `/provider/v1/models` and filters it by the Go plan membership rule:
+
+- **Open-source models are kept by default** (deepseek, Qwen, MiniMaxAI, xiaomi, stepfun, tencent, nvidia, moonshotai, etc.).
+- **A few premium exceptions are hardcoded** for the ones the Go plan includes, e.g. GPT-5.6 Luna, Grok 4.5, Muse Spark 1.2 Contributor.
+- All other premium models (Claude, Gemini, Grok 4.6, ...) are excluded.
+
+It then merges each model's Reasoning Effort support from the official CLI catalog (CDN).
 
 ## Install
 
@@ -37,15 +41,7 @@ Or add a row to your profile's `cordis.patch.yml`:
 
 ## After installing
 
-Configure your API key, either way:
-
-- Via environment variable:
-
-```sh
-export COMMANDCODE_API_KEY="your-command-code-api-key"
-```
-
-- Or store it through DSH's credentials service (written by the web Models page).
+Store your API key through DSH's credentials service (written by the web Models page).
 
 No model config is needed — on startup the plugin syncs the models included in your Go plan from `/provider/v1/models`, and merges per-model Reasoning Effort support from the official CLI catalog (CDN). After install, just pick the Command Code Go provider and a model in the web Models page.
 
@@ -76,6 +72,8 @@ All fields optional, defaults work out of the box:
 ## Credit
 
 Port of [brent-weatherall/opencode-commandcode-provider](https://github.com/brent-weatherall/opencode-commandcode-provider) to DSH.
+
+This plugin adds dynamic reasoning effort extraction, parsed from <https://cdn.jsdelivr.net/npm/command-code@latest/dist/bundled/command-code-knowledge/reference/models.md>.
 
 ## License
 
