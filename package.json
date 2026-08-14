@@ -1,5 +1,5 @@
 {
-  "name": "dsh-commandcode-go-provider",
+  "name": "@jiesou/dsh-commandcode-go-provider",
   "version": "0.1.1",
   "description": "Command Code Go provider adapter for dsh: scan the Go-plan model catalog dynamically and serve /alpha/generate through the harness LLM seam",
   "type": "module",

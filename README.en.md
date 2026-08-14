@@ -1,4 +1,4 @@
-# dsh-commandcode-go-provider
+# @jiesou/dsh-commandcode-go-provider
 
 Command Code Go API provider for dsh.
 
@@ -22,7 +22,7 @@ It then merges each model's Reasoning Effort support from the official CLI catal
 From npm (prebuilt, recommended):
 
 ```sh
-dsh plugin --profile <name> add dsh-commandcode-go-provider
+dsh plugin --profile <name> add @jiesou/dsh-commandcode-go-provider
 ```
 
 Or from GitHub (zero-build, artifacts are committed):
@@ -36,7 +36,7 @@ Or add a row to your profile's `cordis.patch.yml`:
 ```yaml
 - insert:
     - id: commandcode-go
-      name: dsh-commandcode-go-provider
+      name: '@jiesou/dsh-commandcode-go-provider'
 ```
 
 ## After installing
@@ -51,7 +51,7 @@ All fields optional, defaults work out of the box:
 
 ```yaml
 - id: commandcode-go
-  name: dsh-commandcode-go-provider
+  name: '@jiesou/dsh-commandcode-go-provider'
   config:
     apiKeyEnv: COMMANDCODE_API_KEY
     baseURL: https://api.commandcode.ai

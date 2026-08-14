@@ -1,4 +1,4 @@
-# dsh-commandcode-go-provider
+# @jiesou/dsh-commandcode-go-provider
 
 Command Code Go API provider for dsh.
 
@@ -22,7 +22,7 @@ Command Code 提供的订阅分两种：
 从 npm 安装（预构建产物，推荐）：
 
 ```sh
-dsh plugin --profile <name> add dsh-commandcode-go-provider
+dsh plugin --profile <name> add @jiesou/dsh-commandcode-go-provider
 ```
 
 或从 GitHub 安装（零构建，产物已入库）：
@@ -36,7 +36,7 @@ dsh plugin --profile <name> add github:jiesou/dsh-commandcode-go-provider
 ```yaml
 - insert:
     - id: commandcode-go
-      name: dsh-commandcode-go-provider
+      name: '@jiesou/dsh-commandcode-go-provider'
 ```
 
 ## 安装之后
@@ -51,7 +51,7 @@ dsh plugin --profile <name> add github:jiesou/dsh-commandcode-go-provider
 
 ```yaml
 - id: commandcode-go
-  name: dsh-commandcode-go-provider
+  name: '@jiesou/dsh-commandcode-go-provider'
   config:
     apiKeyEnv: COMMANDCODE_API_KEY
     baseURL: https://api.commandcode.ai
