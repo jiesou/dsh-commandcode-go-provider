@@ -35,16 +35,12 @@ export interface CommandCodeGoConnectionOptions {
     apiKeyEnv: CredentialRef;
     /** Gateway base URL; `/alpha/generate` is appended. */
     baseURL: string;
-    /** Adapter-level reasoning effort default, when configured. */
-    reasoningEffort?: string;
     /** Default per-request output cap. */
     maxTokens: number;
     /** Positive context capacity used when the selected model has no exact value. */
     defaultContextWindow: number;
-    /** Advisory models; requests remain unrestricted. */
+    /** Scanned Go catalog; requests remain unrestricted. */
     models: readonly CommandCodeGoModel[];
-    /** Maximum provider idle time while one stream read is outstanding. */
-    streamIdleTimeoutMs: number;
     /** Provider-owned model-request retry policy, already resolved. */
     retryPolicy: ResolvedRetryPolicy;
 }

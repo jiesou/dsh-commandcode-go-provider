@@ -54,16 +54,12 @@ export interface CommandCodeGoConnectionOptions {
   apiKeyEnv: CredentialRef
   /** Gateway base URL; `/alpha/generate` is appended. */
   baseURL: string
-  /** Adapter-level reasoning effort default, when configured. */
-  reasoningEffort?: string
   /** Default per-request output cap. */
   maxTokens: number
   /** Positive context capacity used when the selected model has no exact value. */
   defaultContextWindow: number
-  /** Advisory models; requests remain unrestricted. */
+  /** Scanned Go catalog; requests remain unrestricted. */
   models: readonly CommandCodeGoModel[]
-  /** Maximum provider idle time while one stream read is outstanding. */
-  streamIdleTimeoutMs: number
   /** Provider-owned model-request retry policy, already resolved. */
   retryPolicy: ResolvedRetryPolicy
 }
@@ -85,8 +81,6 @@ export const DEFAULT_MAX_TOKENS = 64_000
 
 const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 const OFF_REASONING_EFFORT = ReasoningEffortId('off')
-const HIGH_REASONING_EFFORT = ReasoningEffortId('high')
-const MAX_REASONING_EFFORT = ReasoningEffortId('max')
 
 /** Effort labels in the gateway's own vocabulary, for selector display. */
 const EFFORT_LABELS: Readonly<Record<string, string>> = {
@@ -98,6 +92,9 @@ const EFFORT_LABELS: Readonly<Record<string, string>> = {
   xhigh: 'X-High',
   max: 'Max',
 }
+
+/** The full reasoning-effort ladder the gateway accepts, low to high. */
+const FULL_EFFORT_LADDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
 function effortInfo(effort: string): { id: ReturnType<typeof ReasoningEffortId>, name: string } {
   return { id: ReasoningEffortId(effort), name: EFFORT_LABELS[effort] ?? effort }
@@ -114,44 +111,22 @@ function modelInfo(provider: string, model: CommandCodeGoModel): LlmModelInfo {
 
 /**
  * Build the reasoning-effort selector for one model. Models whose effort
- * support is known expose exactly their supported levels (plus `off`); models
- * without metadata let the gateway choose reasoning depth, so no `reasoning`
- * block is advertised and requests leave `reasoning_effort` unset.
- *
- * The default effort always lands in the model's supported set — the harness
- * rejects a default the model does not advertise. `high` is preferred when
- * supported; otherwise the highest advertised level (the catalog lists
- * efforts ascending) is used. An explicitly configured plugin default wins
- * when it is supported by the model.
+ * support is known expose exactly their supported levels (plus `off`);
+ * models without metadata expose the full ladder (`off` plus minimal to
+ * max) so every gateway level stays reachable. No default effort is pinned:
+ * the gateway decides when a request names none.
  */
-function reasoningFor(
-  model: CommandCodeGoModel | undefined,
-  configuredEffort: string | undefined,
-): LlmModelReasoningInfo | undefined {
+function reasoningFor(model: CommandCodeGoModel | undefined): LlmModelReasoningInfo {
   const efforts = model?.efforts
-  if (efforts === undefined || efforts.length === 0) return undefined
-  const selectable = [
-    { id: OFF_REASONING_EFFORT, name: EFFORT_LABELS.off },
-    ...efforts.map(effortInfo),
-  ]
-  const configured = configuredEffort === 'off'
-    ? OFF_REASONING_EFFORT
-    : configuredEffort === 'max'
-      ? MAX_REASONING_EFFORT
-      : configuredEffort === 'high'
-        ? HIGH_REASONING_EFFORT
-        : undefined
-  let defaultEffort = configured
-  if (defaultEffort !== undefined) {
-    const supported = efforts.some((effort) => ReasoningEffortId(effort) === defaultEffort)
-    if (!supported) defaultEffort = undefined
+  const levels = efforts !== undefined && efforts.length > 0
+    ? efforts
+    : FULL_EFFORT_LADDER
+  return {
+    efforts: [
+      { id: OFF_REASONING_EFFORT, name: EFFORT_LABELS.off },
+      ...levels.map(effortInfo),
+    ],
   }
-  if (defaultEffort === undefined) {
-    defaultEffort = efforts.includes('high')
-      ? HIGH_REASONING_EFFORT
-      : ReasoningEffortId(efforts[efforts.length - 1])
-  }
-  return { efforts: selectable, defaultEffort }
 }
 
 /**
@@ -186,14 +161,14 @@ export class CommandCodeGoAdapter extends LlmAdapter {
     const connection = this.config.options()
     const configured = connection.models.find(entry => entry.id === model)
     const contextWindow = configured?.contextWindow ?? connection.defaultContextWindow
-    const reasoning = reasoningFor(configured, connection.reasoningEffort)
+    const reasoning = reasoningFor(configured)
     return Promise.resolve({
       ...configured === undefined
         ? { provider, id: model, name: model, inputModalities: ['text' as const] }
         : modelInfo(provider, configured),
       context: { contextWindow },
       defaultMaxTokens: configured?.maxTokens ?? connection.maxTokens,
-      ...reasoning === undefined ? {} : { reasoning },
+      reasoning,
     })
   }
 
@@ -204,7 +179,7 @@ export class CommandCodeGoAdapter extends LlmAdapter {
     const upstream = options.signal === undefined
       ? consumer.signal
       : AbortSignal.any([options.signal, consumer.signal])
-    using watchdog = idleWatchdog(upstream, connection.streamIdleTimeoutMs, STREAM_IDLE_TIMEOUT_CODE)
+    using watchdog = idleWatchdog(upstream, DEFAULT_STREAM_IDLE_TIMEOUT_MS, STREAM_IDLE_TIMEOUT_CODE)
     const iterator = this.request(
       options,
       watchdog.signal,
@@ -224,7 +199,7 @@ export class CommandCodeGoAdapter extends LlmAdapter {
     } catch (error: unknown) {
       if (timeoutOf(watchdog.signal, STREAM_IDLE_TIMEOUT_CODE) !== undefined) {
         throw new LlmError(
-          `Command Code stream idle timeout after ${connection.streamIdleTimeoutMs}ms`,
+          `Command Code stream idle timeout after ${DEFAULT_STREAM_IDLE_TIMEOUT_MS}ms`,
           'TIMEOUT',
           { cause: error },
         )

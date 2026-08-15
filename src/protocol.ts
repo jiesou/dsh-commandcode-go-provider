@@ -33,6 +33,9 @@ import { platform, arch } from 'node:os'
 /** Gateway version pinned to a known-good Command Code CLI release. */
 export const CC_VERSION = '0.26.20'
 
+/** Last-resort output cap when a request carries no maxTokens (matches the adapter default). */
+const DEFAULT_MAX_TOKENS = 64_000
+
 /** Line-delimited JSON stream: one JSON object per line (not SSE `data:` framing). */
 export interface CcStreamEvent {
   type: string
@@ -201,7 +204,7 @@ export function buildRequest(options: GenerateOptions): CcRequestEnvelope {
     messages,
     tools,
     system,
-    max_tokens: options.maxTokens ?? 16384,
+    max_tokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
     stream: true,
   }
   if (options.temperature !== undefined) params.temperature = options.temperature

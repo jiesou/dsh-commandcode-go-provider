@@ -38,20 +38,14 @@ export interface Config {
     apiKeyEnv?: string;
     /** Gateway base URL; defaults to `https://api.commandcode.ai`. */
     baseURL?: string;
-    /** Default reasoning effort when the caller names none; the model's catalog effort set decides. */
-    reasoningEffort?: 'off' | 'high' | 'max';
     /** Default per-request output cap (default 64,000); explicit request values win. */
     maxTokens?: number;
     /** Positive context capacity used when the selected model has no exact value (default 1,000,000). */
     defaultContextWindow?: number;
-    /** Advisory models; the live scan replaces this when it succeeds. */
-    models?: CommandCodeGoModel[];
-    /** Maximum provider idle time while one stream read is outstanding (default five minutes). */
-    streamIdleTimeoutMs?: number;
     /** Provider-owned model-request retry policy; omission uses normal defaults. */
     retryPolicy?: RetryPolicyConfig;
 }
 export declare const Config: z<Config>;
 /** The one explicit resolve step from raw config to validated connection facts. */
-export declare function resolveAdapterOptions(config: Config): CommandCodeGoConnectionOptions;
+export declare function resolveAdapterOptions(config: Config, scanned: readonly CommandCodeGoModel[]): CommandCodeGoConnectionOptions;
 export declare function apply(ctx: Context, config: Config): void;

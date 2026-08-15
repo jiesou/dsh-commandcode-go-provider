@@ -22,21 +22,13 @@ It then merges each model's Reasoning Effort support from the official CLI catal
 From npm (prebuilt, recommended):
 
 ```sh
-dsh plugin --profile <name> add @jiesou/dsh-commandcode-go-provider
+dsh plugin --profile web add @jiesou/dsh-commandcode-go-provider
 ```
 
-Or from GitHub (zero-build, artifacts are committed):
+Or from GitHub:
 
 ```sh
-dsh plugin --profile <name> add github:jiesou/dsh-commandcode-go-provider
-```
-
-Or add a row to your profile's `cordis.patch.yml`:
-
-```yaml
-- insert:
-    - id: commandcode-go
-      name: '@jiesou/dsh-commandcode-go-provider'
+dsh plugin --profile web add github:jiesou/dsh-commandcode-go-provider
 ```
 
 Your Command Code API key should be written to `~/.dsh/.credentials.yaml`:
@@ -61,7 +53,6 @@ All fields optional, defaults work out of the box:
   config:
     apiKeyEnv: COMMANDCODE_API_KEY
     baseURL: https://api.commandcode.ai
-    reasoningEffort: high
     maxTokens: 64000
     defaultContextWindow: 1000000
 ```
@@ -70,10 +61,10 @@ All fields optional, defaults work out of the box:
 | --- | --- | --- | --- |
 | `apiKeyEnv` | `string` | `"COMMANDCODE_API_KEY"` | Env var name (or credential ref) holding the API key |
 | `baseURL` | `string` | `"https://api.commandcode.ai"` | Command Code gateway base URL; `/alpha/generate` is appended |
-| `reasoningEffort` | `string` | `undefined` | Default reasoning depth (`off` / `high` / `max`); explicit request values win |
 | `maxTokens` | `number` | `64000` | Per-request output token cap |
 | `defaultContextWindow` | `number` | `1000000` | Fallback context capacity when a model has no exact value |
-| `streamIdleTimeoutMs` | `number` | `300000` | Max idle timeout while one stream read is outstanding (ms) |
+
+Reasoning effort needs no configuration: the plugin merges each model's supported levels from the official CLI catalog (CDN); models without known levels expose the full ladder (`off` plus minimal to max), and the gateway decides the default depth.
 
 ## Credit
 

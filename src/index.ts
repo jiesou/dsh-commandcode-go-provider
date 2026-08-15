@@ -28,7 +28,6 @@ import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
-import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { CommandCodeGoAdapter, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, DEFAULT_STREAM_IDLE_TIMEOUT_MS } from './adapter.js'
 import type { CommandCodeGoConnectionOptions, CommandCodeGoModel } from './adapter.js'
 import { fetchCatalogEfforts, fetchGoModels } from './models.js'
@@ -63,73 +62,24 @@ export interface Config {
   apiKeyEnv?: string
   /** Gateway base URL; defaults to `https://api.commandcode.ai`. */
   baseURL?: string
-  /** Default reasoning effort when the caller names none; the model's catalog effort set decides. */
-  reasoningEffort?: 'off' | 'high' | 'max'
   /** Default per-request output cap (default 64,000); explicit request values win. */
   maxTokens?: number
   /** Positive context capacity used when the selected model has no exact value (default 1,000,000). */
   defaultContextWindow?: number
-  /** Advisory models; the live scan replaces this when it succeeds. */
-  models?: CommandCodeGoModel[]
-  /** Maximum provider idle time while one stream read is outstanding (default five minutes). */
-  streamIdleTimeoutMs?: number
   /** Provider-owned model-request retry policy; omission uses normal defaults. */
   retryPolicy?: RetryPolicyConfig
 }
 
-const catalogModel: z<CommandCodeGoModel> = z.object({
-  id: z.string().required(),
-  name: z.string(),
-  contextWindow: z.number().step(1).min(1),
-  maxTokens: z.number().step(1).min(1),
-  efforts: z.array(z.string().step(1)),
-})
-
 export const Config: z<Config> = z.object({
   apiKeyEnv: z.string().role('credential-ref').default(DEFAULT_API_KEY_ENV),
   baseURL: z.string().default(DEFAULT_BASE_URL),
-  reasoningEffort: z.union(['off', 'high', 'max']),
   maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(DEFAULT_MAX_TOKENS),
   defaultContextWindow: z.number().step(1).min(1).default(DEFAULT_CONTEXT_WINDOW),
-  models: z.array(catalogModel).default([]),
-  streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   retryPolicy: RetryPolicySchema,
 })
 
-/** Resolve, validate, and detach the advisory model catalog. */
-function resolveModels(models: readonly CommandCodeGoModel[] | undefined): CommandCodeGoModel[] {
-  const seen = new Set<string>()
-  return (models ?? []).map((model) => {
-    if (model.id.length === 0) throw new Error('commandcode-go: catalog model ids must be non-empty')
-    if (model.name !== undefined && model.name.length === 0) {
-      throw new Error(`commandcode-go: catalog model "${model.id}" has an empty name`)
-    }
-    if (model.contextWindow !== undefined
-      && (!Number.isInteger(model.contextWindow) || model.contextWindow <= 0)) {
-      throw new Error(`commandcode-go: catalog model "${model.id}" contextWindow must be a positive integer`)
-    }
-    if (model.maxTokens !== undefined && (!Number.isInteger(model.maxTokens) || model.maxTokens <= 0)) {
-      throw new Error(`commandcode-go: catalog model "${model.id}" maxTokens must be a positive integer`)
-    }
-    if (model.efforts !== undefined
-      && (!Array.isArray(model.efforts)
-        || model.efforts.some((effort) => typeof effort !== 'string' || effort.length === 0))) {
-      throw new Error(`commandcode-go: catalog model "${model.id}" efforts must be non-empty strings`)
-    }
-    if (seen.has(model.id)) throw new Error(`commandcode-go: duplicate catalog model "${model.id}"`)
-    seen.add(model.id)
-    return {
-      id: model.id,
-      ...model.name === undefined ? {} : { name: model.name },
-      ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
-      ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
-      ...model.efforts === undefined ? {} : { efforts: [...model.efforts] },
-    }
-  })
-}
-
 /** The one explicit resolve step from raw config to validated connection facts. */
-export function resolveAdapterOptions(config: Config): CommandCodeGoConnectionOptions {
+export function resolveAdapterOptions(config: Config, scanned: readonly CommandCodeGoModel[]): CommandCodeGoConnectionOptions {
   if (config.defaultContextWindow !== undefined
     && (!Number.isInteger(config.defaultContextWindow) || config.defaultContextWindow <= 0)) {
     throw new Error('commandcode-go: defaultContextWindow must be a positive integer')
@@ -137,20 +87,12 @@ export function resolveAdapterOptions(config: Config): CommandCodeGoConnectionOp
   if (config.maxTokens !== undefined && (!Number.isSafeInteger(config.maxTokens) || config.maxTokens <= 0)) {
     throw new Error('commandcode-go: maxTokens must be a positive safe integer')
   }
-  const streamIdleTimeoutMs = config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
-  if (!Number.isFinite(streamIdleTimeoutMs)
-    || streamIdleTimeoutMs <= 0
-    || streamIdleTimeoutMs > MAX_TIMER_DELAY_MS) {
-    throw new Error(`commandcode-go: streamIdleTimeoutMs must be a positive finite number no greater than ${MAX_TIMER_DELAY_MS}`)
-  }
   return {
     apiKeyEnv: credentialRef(config.apiKeyEnv ?? DEFAULT_API_KEY_ENV),
     baseURL: config.baseURL ?? DEFAULT_BASE_URL,
-    reasoningEffort: config.reasoningEffort,
     maxTokens: config.maxTokens ?? DEFAULT_MAX_TOKENS,
     defaultContextWindow: config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
-    models: resolveModels(config.models),
-    streamIdleTimeoutMs,
+    models: scanned,
     retryPolicy: resolveRetryPolicy(config.retryPolicy, 'commandcode-go: retryPolicy'),
   }
 }
@@ -171,8 +113,7 @@ export function apply(ctx: Context, config: Config): void {
       return lastGood
     }
     try {
-      const merged = { ...raw, models: [...(raw.models ?? []), ...scanned] }
-      const next = resolveAdapterOptions(merged)
+      const next = resolveAdapterOptions(raw, scanned)
       lastRaw = raw
       lastGood = next
       lastScannedVersion = scannedVersion
