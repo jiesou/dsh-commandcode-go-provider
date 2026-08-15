@@ -39,6 +39,12 @@ Or add a row to your profile's `cordis.patch.yml`:
       name: '@jiesou/dsh-commandcode-go-provider'
 ```
 
+Your Command Code API key should be written to `~/.dsh/.credentials.yaml`:
+
+```sh
+echo 'COMMANDCODE_API_KEY: [your key, be like user_xxxx]' >> ~/.dsh/.credentials.yaml
+```
+
 ## After installing
 
 Store your API key through DSH's credentials service (written by the web Models page).

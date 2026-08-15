@@ -39,6 +39,12 @@ dsh plugin --profile <name> add github:jiesou/dsh-commandcode-go-provider
       name: '@jiesou/dsh-commandcode-go-provider'
 ```
 
+Command Code 的 API Key 应写入 `~/.dsh/.credentials.yaml`：
+
+```sh
+echo 'COMMANDCODE_API_KEY: [your key, be like user_xxxx]' >> ~/.dsh/.credentials.yaml
+```
+
 ## 安装之后
 
 通过 DSH 的 credentials 服务保存 API Key（Web Models 设置页写入）。
