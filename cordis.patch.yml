@@ -1,4 +1,4 @@
 # dsh bundle patch: inserts this plugin into a profile's layer stack.
 - insert:
-    - id: commandcode-go
+    - id: commandcode-go-provider
       name: '@jiesou/dsh-commandcode-go-provider'
