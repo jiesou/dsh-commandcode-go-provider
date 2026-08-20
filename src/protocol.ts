@@ -173,7 +173,7 @@ function serializeUser(message: Message): CcMessage {
     content: toolResults.map(result => ({
       type: 'tool-result' as const,
       toolCallId: result.toolCallId,
-      toolName: '',
+      toolName: 'unknown',
       output: toolResultOutput(result),
     })),
   }
