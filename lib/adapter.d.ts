@@ -15,7 +15,7 @@
 import { LlmAdapter } from '@deepseek-ai/dsh-llm';
 import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, ResolvedRetryPolicy, StreamChunk } from '@deepseek-ai/dsh-llm';
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials';
-import { newThreadId } from './protocol.js';
+import { DEFAULT_MAX_TOKENS } from './protocol.js';
 /** One catalog model advertised by the adapter. */
 export interface CommandCodeGoModel {
     /** Wire model id accepted by the gateway. */
@@ -55,8 +55,7 @@ export interface CommandCodeGoAdapterOptions {
 export declare const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300000;
 /** Default combined request/response context capacity. */
 export declare const DEFAULT_CONTEXT_WINDOW = 1000000;
-/** Default per-request output-token cap. */
-export declare const DEFAULT_MAX_TOKENS = 64000;
+export { DEFAULT_MAX_TOKENS };
 /**
  * Command Code Go adapter. One instance serves every model in the scanned Go
  * catalog; the harness model id IS the gateway wire model id.
@@ -71,4 +70,3 @@ export declare class CommandCodeGoAdapter extends LlmAdapter {
     stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
     private request;
 }
-export { newThreadId };

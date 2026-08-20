@@ -12,13 +12,12 @@
  * The request envelope shape mirrors the `cmd` CLI (`command-code` npm
  * package) and the opencode commandcode-go provider plugin:
  * - `config.environment` is a plain string (`<os>-<arch>`), not an object.
- * - `threadId` must be a valid UUID.
  * - Gateway compatibility rides on the `x-command-code-version` header.
  *
  * @module commandcode-go/protocol
  */
 
-import { CallId, LlmError } from '@deepseek-ai/dsh-llm'
+import { CallId } from '@deepseek-ai/dsh-llm'
 import type {
   ContentBlock,
   FinishReason,
@@ -27,14 +26,13 @@ import type {
   StreamChunk,
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
-import { randomUUID } from 'node:crypto'
 import { platform, arch } from 'node:os'
 
 /** Gateway version pinned to a known-good Command Code CLI release. */
 export const CC_VERSION = '0.26.20'
 
 /** Last-resort output cap when a request carries no maxTokens (matches the adapter default). */
-const DEFAULT_MAX_TOKENS = 64_000
+export const DEFAULT_MAX_TOKENS = 64_000
 
 /** Line-delimited JSON stream: one JSON object per line (not SSE `data:` framing). */
 export interface CcStreamEvent {
@@ -214,7 +212,7 @@ export function buildRequest(options: GenerateOptions): CcRequestEnvelope {
 
   return {
     config: {
-      workingDir: process.cwd() ?? '/',
+      workingDir: process.cwd(),
       date: new Date().toISOString().split('T')[0],
       environment: `${platform()}-${arch()}`,
       structure: [],
@@ -234,7 +232,7 @@ export function buildRequest(options: GenerateOptions): CcRequestEnvelope {
 
 /**
  * Translate one gateway stream event into one or more harness StreamChunks.
- * @returns null when the event has no harness representation.
+ * @returns an empty array when the event has no harness representation.
  */
 export function eventToChunks(
   event: CcStreamEvent,
@@ -304,14 +302,12 @@ export function eventToChunks(
       chunks.push({ type: 'finish', reason: mapFinishReason(reason) })
       break
     }
-    default:
-      return chunks
   }
   return chunks
 }
 
 /** Map the gateway finish-reason vocabulary to the harness FinishReason. */
-export function mapFinishReason(raw: unknown): FinishReason {
+function mapFinishReason(raw: unknown): FinishReason {
   const reason = typeof raw === 'string' ? raw : 'stop'
   switch (reason) {
     case 'stop':
@@ -332,6 +328,17 @@ export function mapFinishReason(raw: unknown): FinishReason {
   }
 }
 
+function parseEventLine(line: string): CcStreamEvent | undefined {
+  if (line.length === 0 || line.startsWith(':')) return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(line)
+  } catch {
+    return undefined
+  }
+  return isRecord(parsed) && typeof parsed.type === 'string' ? parsed as unknown as CcStreamEvent : undefined
+}
+
 /**
  * Parse a line-delimited JSON byte stream from `/alpha/generate` into events.
  * Lines are bare JSON objects (the gateway sends no `data:` SSE prefix).
@@ -348,29 +355,13 @@ export async function* parseEventStream(stream: ReadableStream<Uint8Array>): Asy
       while ((newline = buffer.indexOf('\n')) !== -1) {
         const line = buffer.slice(0, newline).trim()
         buffer = buffer.slice(newline + 1)
-        if (line.length === 0 || line.startsWith(':')) continue
-        let parsed: unknown
-        try {
-          parsed = JSON.parse(line)
-        } catch {
-          continue // Skip malformed frames.
-        }
-        if (isRecord(parsed) && typeof parsed.type === 'string') {
-          yield parsed as unknown as CcStreamEvent
-        }
+        const event = parseEventLine(line)
+        if (event !== undefined) yield event
       }
       if (done) {
         const tail = buffer.trim()
-        if (tail.length > 0 && !tail.startsWith(':')) {
-          try {
-            const parsed = JSON.parse(tail) as unknown
-            if (isRecord(parsed) && typeof parsed.type === 'string') {
-              yield parsed as unknown as CcStreamEvent
-            }
-          } catch {
-            // Unterminated tail is truncation; ignore.
-          }
-        }
+        const event = parseEventLine(tail)
+        if (event !== undefined) yield event
         return
       }
     }
@@ -391,14 +382,4 @@ export function gatewayErrorMessage(body: string): string | undefined {
     // Not JSON; caller falls back to the HTTP status.
   }
   return undefined
-}
-
-/** Normalize a transport error into a coded LlmError. */
-export function transportError(message: string, cause: unknown): LlmError {
-  return new LlmError(message, 'TRANSPORT', { cause })
-}
-
-/** A fresh UUID for the gateway `threadId` field. */
-export function newThreadId(): string {
-  return randomUUID()
 }

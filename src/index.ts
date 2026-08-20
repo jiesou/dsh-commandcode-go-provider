@@ -102,28 +102,23 @@ export function apply(ctx: Context, config: Config): void {
   // scan cannot be clobbered by a settings snapshot; the adapter reads the
   // merged view through this thunk.
   let scanned: CommandCodeGoModel[] = []
-  let scannedVersion = 0
   let current: () => Config = () => config
-  let lastRaw: Config | undefined
-  let lastGood: CommandCodeGoConnectionOptions | undefined
-  let lastScannedVersion = 0
+  let cache: { raw: Config; scanned: readonly CommandCodeGoModel[]; options: CommandCodeGoConnectionOptions } | undefined
   const options = (): CommandCodeGoConnectionOptions => {
     const raw = current()
-    if (raw === lastRaw && lastScannedVersion === scannedVersion && lastGood !== undefined) {
-      return lastGood
+    if (cache !== undefined && cache.raw === raw && cache.scanned === scanned) {
+      return cache.options
     }
     try {
       const next = resolveAdapterOptions(raw, scanned)
-      lastRaw = raw
-      lastGood = next
-      lastScannedVersion = scannedVersion
+      cache = { raw, scanned, options: next }
       return next
     } catch (error) {
-      if (lastGood === undefined) throw error
-      lastRaw = raw
+      if (cache === undefined) throw error
       ctx.logger.error('commandcode-go: keeping the last good configuration after an invalid settings section')
       ctx.logger.error(error)
-      return lastGood
+      cache = { raw, scanned: cache.scanned, options: cache.options }
+      return cache.options
     }
   }
   options()
@@ -197,7 +192,6 @@ export function apply(ctx: Context, config: Config): void {
     }))
     if (deepEqualJson(next, scanned)) return
     scanned = next
-    scannedVersion += 1
     ctx.logger.info('[commandcode-go] synced %d Go model(s): %s', next.length, next.map(m => m.id).join(', '))
   }
 

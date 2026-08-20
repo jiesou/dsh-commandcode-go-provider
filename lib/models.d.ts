@@ -22,11 +22,6 @@
  *
  * @module commandcode-go/models
  */
-export interface RawModelEntry {
-    id: string;
-    name?: string;
-    context_length?: number;
-}
 export interface GoModel {
     id: string;
     name: string;

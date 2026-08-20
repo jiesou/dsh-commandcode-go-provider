@@ -32,7 +32,7 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
-import { buildRequest, CC_VERSION, eventToChunks, gatewayErrorMessage, newThreadId, parseEventStream } from './protocol.js'
+import { buildRequest, CC_VERSION, DEFAULT_MAX_TOKENS, eventToChunks, gatewayErrorMessage, parseEventStream } from './protocol.js'
 
 /** One catalog model advertised by the adapter. */
 export interface CommandCodeGoModel {
@@ -76,8 +76,7 @@ export interface CommandCodeGoAdapterOptions {
 export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
 /** Default combined request/response context capacity. */
 export const DEFAULT_CONTEXT_WINDOW = 1_000_000
-/** Default per-request output-token cap. */
-export const DEFAULT_MAX_TOKENS = 64_000
+export { DEFAULT_MAX_TOKENS }
 
 const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 const OFF_REASONING_EFFORT = ReasoningEffortId('off')
@@ -160,15 +159,14 @@ export class CommandCodeGoAdapter extends LlmAdapter {
   ): Promise<LlmResolvedModelInfo> {
     const connection = this.config.options()
     const configured = connection.models.find(entry => entry.id === model)
-    const contextWindow = configured?.contextWindow ?? connection.defaultContextWindow
-    const reasoning = reasoningFor(configured)
+    const info = configured === undefined
+      ? modelInfo(provider, { id: model, name: model })
+      : modelInfo(provider, configured)
     return Promise.resolve({
-      ...configured === undefined
-        ? { provider, id: model, name: model, inputModalities: ['text' as const] }
-        : modelInfo(provider, configured),
-      context: { contextWindow },
+      ...info,
+      context: { contextWindow: configured?.contextWindow ?? connection.defaultContextWindow },
       defaultMaxTokens: configured?.maxTokens ?? connection.maxTokens,
-      reasoning,
+      reasoning: reasoningFor(configured),
     })
   }
 
@@ -299,7 +297,3 @@ function httpErrorCode(status: number, body: string): string {
   if (status >= 500) return 'SERVER'
   return `HTTP_${status}`
 }
-
-// Keep `newThreadId` reachable for future streaming-id wiring (some gateway
-// revisions expect the threadId echoed in follow-up requests).
-export { newThreadId }

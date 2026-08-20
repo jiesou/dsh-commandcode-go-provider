@@ -12,15 +12,15 @@
  * The request envelope shape mirrors the `cmd` CLI (`command-code` npm
  * package) and the opencode commandcode-go provider plugin:
  * - `config.environment` is a plain string (`<os>-<arch>`), not an object.
- * - `threadId` must be a valid UUID.
  * - Gateway compatibility rides on the `x-command-code-version` header.
  *
  * @module commandcode-go/protocol
  */
-import { LlmError } from '@deepseek-ai/dsh-llm';
-import type { FinishReason, GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm';
+import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm';
 /** Gateway version pinned to a known-good Command Code CLI release. */
 export declare const CC_VERSION = "0.26.20";
+/** Last-resort output cap when a request carries no maxTokens (matches the adapter default). */
+export declare const DEFAULT_MAX_TOKENS = 64000;
 /** Line-delimited JSON stream: one JSON object per line (not SSE `data:` framing). */
 export interface CcStreamEvent {
     type: string;
@@ -109,13 +109,11 @@ interface CcRequestEnvelope {
 export declare function buildRequest(options: GenerateOptions): CcRequestEnvelope;
 /**
  * Translate one gateway stream event into one or more harness StreamChunks.
- * @returns null when the event has no harness representation.
+ * @returns an empty array when the event has no harness representation.
  */
 export declare function eventToChunks(event: CcStreamEvent, state: {
     blockIndex: number;
 }): StreamChunk[];
-/** Map the gateway finish-reason vocabulary to the harness FinishReason. */
-export declare function mapFinishReason(raw: unknown): FinishReason;
 /**
  * Parse a line-delimited JSON byte stream from `/alpha/generate` into events.
  * Lines are bare JSON objects (the gateway sends no `data:` SSE prefix).
@@ -123,8 +121,4 @@ export declare function mapFinishReason(raw: unknown): FinishReason;
 export declare function parseEventStream(stream: ReadableStream<Uint8Array>): AsyncGenerator<CcStreamEvent>;
 /** Extract the human message from a gateway error body, when present. */
 export declare function gatewayErrorMessage(body: string): string | undefined;
-/** Normalize a transport error into a coded LlmError. */
-export declare function transportError(message: string, cause: unknown): LlmError;
-/** A fresh UUID for the gateway `threadId` field. */
-export declare function newThreadId(): string;
 export {};

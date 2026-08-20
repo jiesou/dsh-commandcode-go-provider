@@ -23,12 +23,6 @@
  * @module commandcode-go/models
  */
 
-export interface RawModelEntry {
-  id: string
-  name?: string
-  context_length?: number
-}
-
 export interface GoModel {
   id: string
   name: string
@@ -134,20 +128,14 @@ export async function fetchCatalogEfforts(
   url: string = CATALOG_URL,
   fetchImpl: typeof fetch = fetch,
 ): Promise<Map<string, string[]>> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), CATALOG_TIMEOUT_MS)
-  try {
-    const response = await fetchImpl(url, {
-      headers: { accept: 'text/markdown' },
-      signal: controller.signal,
-    })
-    if (!response.ok) {
-      throw new Error(`Command Code catalog answered HTTP ${response.status}`)
-    }
-    return parseCatalogEfforts(await response.text())
-  } finally {
-    clearTimeout(timer)
+  const response = await fetchImpl(url, {
+    headers: { accept: 'text/markdown' },
+    signal: AbortSignal.timeout(CATALOG_TIMEOUT_MS),
+  })
+  if (!response.ok) {
+    throw new Error(`Command Code catalog answered HTTP ${response.status}`)
   }
+  return parseCatalogEfforts(await response.text())
 }
 
 /** Fetch the full catalog and filter to Go-usable models. */
