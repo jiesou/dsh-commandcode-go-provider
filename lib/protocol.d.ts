@@ -14,13 +14,20 @@
  * - `config.environment` is a plain string (`<os>-<arch>`), not an object.
  * - Gateway compatibility rides on the `x-command-code-version` header.
  *
- * @module commandcode-go/protocol
+ * @module dsh-commandcode-go-provider/protocol
  */
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm';
 /** Gateway version pinned to a known-good Command Code CLI release. */
 export declare const CC_VERSION = "0.26.20";
 /** Last-resort output cap when a request carries no maxTokens (matches the adapter default). */
 export declare const DEFAULT_MAX_TOKENS = 64000;
+/**
+ * Reasoning-effort values the gateway accepts (the CLI's own
+ * `isReasoningEffort` list), mapped to their selector labels. There is
+ * deliberately no `off`: a request that names no effort is what "let the model
+ * decide" means on this gateway, so omitting the field IS the default.
+ */
+export declare const GATEWAY_EFFORTS: Readonly<Record<string, string>>;
 /** Line-delimited JSON stream: one JSON object per line (not SSE `data:` framing). */
 export interface CcStreamEvent {
     type: string;
@@ -119,6 +126,26 @@ export declare function eventToChunks(event: CcStreamEvent, state: {
  * Lines are bare JSON objects (the gateway sends no `data:` SSE prefix).
  */
 export declare function parseEventStream(stream: ReadableStream<Uint8Array>): AsyncGenerator<CcStreamEvent>;
-/** Extract the human message from a gateway error body, when present. */
-export declare function gatewayErrorMessage(body: string): string | undefined;
+/**
+ * The upstream detail of an in-stream `error` event.
+ *
+ * A generation that fails after the response headers are sent carries its
+ * only failure text in a `{"type":"error","error":{message,statusCode,
+ * responseBody,…}}` line — there is no HTTP status left to report, so
+ * dropping the event would end the turn with nothing but "stream ended".
+ */
+export declare function streamErrorDetail(event: CcStreamEvent): {
+    detail: string;
+    status?: number;
+};
+/**
+ * The upstream detail of a gateway error body, for an `LlmError` message.
+ *
+ * The gateway answers `{"success":false,"error":{"code","status","message",
+ * "docs"}}`, but an edge (Cloudflare) or a proxy can answer HTML or plain text
+ * instead. A body carrying no recognizable message is passed through verbatim
+ * rather than dropped: an unparsed body still names the failure, while an HTTP
+ * status alone names nothing.
+ */
+export declare function gatewayErrorDetail(body: string): string | undefined;
 export {};

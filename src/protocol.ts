@@ -14,7 +14,7 @@
  * - `config.environment` is a plain string (`<os>-<arch>`), not an object.
  * - Gateway compatibility rides on the `x-command-code-version` header.
  *
- * @module commandcode-go/protocol
+ * @module dsh-commandcode-go-provider/protocol
  */
 
 import { CallId } from '@deepseek-ai/dsh-llm'
@@ -33,6 +33,20 @@ export const CC_VERSION = '0.26.20'
 
 /** Last-resort output cap when a request carries no maxTokens (matches the adapter default). */
 export const DEFAULT_MAX_TOKENS = 64_000
+
+/**
+ * Reasoning-effort values the gateway accepts (the CLI's own
+ * `isReasoningEffort` list), mapped to their selector labels. There is
+ * deliberately no `off`: a request that names no effort is what "let the model
+ * decide" means on this gateway, so omitting the field IS the default.
+ */
+export const GATEWAY_EFFORTS: Readonly<Record<string, string>> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'X-High',
+  max: 'Max',
+}
 
 /** Line-delimited JSON stream: one JSON object per line (not SSE `data:` framing). */
 export interface CcStreamEvent {
@@ -206,7 +220,9 @@ export function buildRequest(options: GenerateOptions): CcRequestEnvelope {
     stream: true,
   }
   if (options.temperature !== undefined) params.temperature = options.temperature
-  if (options.reasoningEffort !== undefined && options.reasoningEffort !== 'off') {
+  // An effort the gateway has no value for (a stale `off` from an older
+  // selector) is dropped rather than rejected upstream.
+  if (options.reasoningEffort !== undefined && options.reasoningEffort in GATEWAY_EFFORTS) {
     params.reasoning_effort = options.reasoningEffort
   }
 
@@ -276,8 +292,12 @@ export function eventToChunks(
       })
       break
     }
-    case 'finish-step': {
-      const usage = isRecord(event.usage) ? event.usage as unknown as CcUsage : undefined
+    // The gateway ends a step with `finish-step`; the CLI's own reader also
+    // accepts a bare `finish` carrying `totalUsage`, so both terminate here.
+    case 'finish-step':
+    case 'finish': {
+      const raw = event.usage ?? event.totalUsage
+      const usage = isRecord(raw) ? raw as unknown as CcUsage : undefined
       if (usage) {
         const inputDetails = isRecord(usage.inputTokenDetails) ? usage.inputTokenDetails : undefined
         const outputDetails = isRecord(usage.outputTokenDetails) ? usage.outputTokenDetails : undefined
@@ -370,16 +390,60 @@ export async function* parseEventStream(stream: ReadableStream<Uint8Array>): Asy
   }
 }
 
-/** Extract the human message from a gateway error body, when present. */
-export function gatewayErrorMessage(body: string): string | undefined {
-  try {
-    const parsed = JSON.parse(body) as unknown
-    if (isRecord(parsed) && isRecord(parsed.error)) {
-      const message = parsed.error.message
-      if (typeof message === 'string' && message.length > 0) return message
-    }
-  } catch {
-    // Not JSON; caller falls back to the HTTP status.
+/** Upstream body budget carried into one error message (pi-ai's own cap). */
+const MAX_ERROR_BODY_CHARS = 4000
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
+}
+
+/**
+ * The upstream detail of an in-stream `error` event.
+ *
+ * A generation that fails after the response headers are sent carries its
+ * only failure text in a `{"type":"error","error":{message,statusCode,
+ * responseBody,…}}` line — there is no HTTP status left to report, so
+ * dropping the event would end the turn with nothing but "stream ended".
+ */
+export function streamErrorDetail(event: CcStreamEvent): { detail: string, status?: number } {
+  const error = isRecord(event.error) ? event.error : event
+  const body = nonEmptyString(error.responseBody)
+  const message = nonEmptyString(error.message)
+    ?? (body === undefined ? undefined : gatewayErrorDetail(body))
+    ?? JSON.stringify(event)
+  const status = typeof error.statusCode === 'number' && Number.isInteger(error.statusCode)
+    ? error.statusCode
+    : undefined
+  const detail = body === undefined || message.includes(body) ? message : `${message}: ${body}`
+  return {
+    detail: detail.slice(0, MAX_ERROR_BODY_CHARS),
+    ...status === undefined ? {} : { status },
   }
-  return undefined
+}
+
+/**
+ * The upstream detail of a gateway error body, for an `LlmError` message.
+ *
+ * The gateway answers `{"success":false,"error":{"code","status","message",
+ * "docs"}}`, but an edge (Cloudflare) or a proxy can answer HTML or plain text
+ * instead. A body carrying no recognizable message is passed through verbatim
+ * rather than dropped: an unparsed body still names the failure, while an HTTP
+ * status alone names nothing.
+ */
+export function gatewayErrorDetail(body: string): string | undefined {
+  const trimmed = body.trim()
+  if (trimmed.length === 0) return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(trimmed)
+  } catch {
+    return trimmed.slice(0, MAX_ERROR_BODY_CHARS)
+  }
+  const envelope = isRecord(parsed) && isRecord(parsed.error) ? parsed.error : parsed
+  const message = isRecord(envelope)
+    ? nonEmptyString(envelope.message) ?? nonEmptyString(envelope.detail)
+    : nonEmptyString(envelope)
+  if (message === undefined) return trimmed.slice(0, MAX_ERROR_BODY_CHARS)
+  const code = isRecord(envelope) ? nonEmptyString(envelope.code) : undefined
+  return code === undefined || message.includes(code) ? message : `${message} [${code}]`
 }

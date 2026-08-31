@@ -1,5 +1,5 @@
 /**
- * commandcode-go — Command Code Go provider for the dsh harness.
+ * dsh-commandcode-go-provider — Command Code Go provider for the dsh harness.
  *
  * A Go-plan subscription has no Provider-API access: the OpenAI-compatible
  * endpoints (`/provider/v1/chat/completions`) answer 403 `upgrade_required`,
@@ -18,19 +18,19 @@
  * 3. Resolves the bearer key per request through the credential seam
  *    (default `COMMANDCODE_API_KEY`), failing loud when it is missing.
  *
- * @module commandcode-go
+ * @module dsh-commandcode-go-provider
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { assertUsableApiKey, LlmError, resolveRetryPolicy, RetryPolicySchema } from '@deepseek-ai/dsh-llm'
+import { assertUsableApiKey, errorChain, LlmError, resolveRetryPolicy, RetryPolicySchema } from '@deepseek-ai/dsh-llm'
 import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { CommandCodeGoAdapter, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, DEFAULT_STREAM_IDLE_TIMEOUT_MS } from './adapter.js'
 import type { CommandCodeGoConnectionOptions, CommandCodeGoModel } from './adapter.js'
-import { fetchCatalogEfforts, fetchGoModels } from './models.js'
+import { fetchCatalog, fetchGoModels } from './models.js'
 
 export {
   CommandCodeGoAdapter,
@@ -39,23 +39,22 @@ export {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
 } from './adapter.js'
 export type { CommandCodeGoAdapterOptions, CommandCodeGoConnectionOptions, CommandCodeGoModel } from './adapter.js'
-export { fetchCatalogEfforts, fetchGoModels, isGoModel, parseCatalogEfforts } from './models.js'
+export { fetchCatalog, fetchGoModels, isGoPlan, parseCatalog } from './models.js'
+export type { CatalogEntry, GoModel } from './models.js'
 
-export const name = 'commandcode-go'
-export const inject = ['llm']
+export const name = 'commandcode-go-provider'
+export const inject = ['llm', 'settings']
 
-const NS = settingsNamespace('commandcode-go')
+const NS = settingsNamespace('commandcode-go-provider')
 const PROVIDER = 'commandcode'
 const DEFAULT_API_KEY_ENV = 'COMMANDCODE_API_KEY'
 
 /** Default gateway base; `/alpha/generate` is appended. */
 const DEFAULT_BASE_URL = 'https://api.commandcode.ai'
-/** Catalog scan cadence; the listing is stable so a slow poll is plenty. */
-const REFRESH_MS = 15 * 60 * 1000
 
 /**
  * Plugin configuration, validated by the same-named schemastery schema and
- * doubling as the `commandcode-go` settings-section shape.
+ * doubling as the `dsh-commandcode-go-provider` settings-section shape.
  */
 export interface Config {
   /** Credential reference resolved per request; defaults to `COMMANDCODE_API_KEY`. */
@@ -78,22 +77,18 @@ export const Config: z<Config> = z.object({
   retryPolicy: RetryPolicySchema,
 })
 
-/** The one explicit resolve step from raw config to validated connection facts. */
+/**
+ * The one explicit resolve step from raw config to connection facts. Bounds
+ * are the schema's job (`Config` pins every numeric floor), so this only maps.
+ */
 export function resolveAdapterOptions(config: Config, scanned: readonly CommandCodeGoModel[]): CommandCodeGoConnectionOptions {
-  if (config.defaultContextWindow !== undefined
-    && (!Number.isInteger(config.defaultContextWindow) || config.defaultContextWindow <= 0)) {
-    throw new Error('commandcode-go: defaultContextWindow must be a positive integer')
-  }
-  if (config.maxTokens !== undefined && (!Number.isSafeInteger(config.maxTokens) || config.maxTokens <= 0)) {
-    throw new Error('commandcode-go: maxTokens must be a positive safe integer')
-  }
   return {
     apiKeyEnv: credentialRef(config.apiKeyEnv ?? DEFAULT_API_KEY_ENV),
     baseURL: config.baseURL ?? DEFAULT_BASE_URL,
     maxTokens: config.maxTokens ?? DEFAULT_MAX_TOKENS,
     defaultContextWindow: config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
     models: scanned,
-    retryPolicy: resolveRetryPolicy(config.retryPolicy, 'commandcode-go: retryPolicy'),
+    retryPolicy: resolveRetryPolicy(config.retryPolicy, 'commandcode-go-provider: retryPolicy'),
   }
 }
 
@@ -109,34 +104,25 @@ export function apply(ctx: Context, config: Config): void {
     if (cache !== undefined && cache.raw === raw && cache.scanned === scanned) {
       return cache.options
     }
-    try {
-      const next = resolveAdapterOptions(raw, scanned)
-      cache = { raw, scanned, options: next }
-      return next
-    } catch (error) {
-      if (cache === undefined) throw error
-      ctx.logger.error('commandcode-go: keeping the last good configuration after an invalid settings section')
-      ctx.logger.error(error)
-      cache = { raw, scanned: cache.scanned, options: cache.options }
-      return cache.options
-    }
+    const next = resolveAdapterOptions(raw, scanned)
+    cache = { raw, scanned, options: next }
+    return next
   }
-  options()
 
   const resolveApiKey = async (): Promise<string> => {
     const ref = options().apiKeyEnv
     const credentials = ctx.get('credentials')
     if (credentials !== undefined) {
       const hit = await credentials.resolve(ref)
-      if (hit !== undefined) return assertUsableApiKey(hit.value, 'commandcode-go', ref)
+      if (hit !== undefined) return assertUsableApiKey(hit.value, 'commandcode-go-provider', ref)
     } else {
       const ambient = launchEnvironmentOf(ctx).get(ref)
       if (ambient !== undefined && ambient.value.length > 0) {
-        return assertUsableApiKey(ambient.value, 'commandcode-go', ref)
+        return assertUsableApiKey(ambient.value, 'commandcode-go-provider', ref)
       }
     }
     throw new LlmError(
-      `commandcode-go: no API key for provider route "${PROVIDER}"; store ${ref} through the credentials`
+      `commandcode-go-provider: no API key for provider route "${PROVIDER}"; store ${ref} through the credentials`
       + ` service (the web Models page writes it), or export ${ref} in the launching environment`,
       'MISSING_CREDENTIAL',
     )
@@ -162,46 +148,22 @@ export function apply(ctx: Context, config: Config): void {
     onChange: ensureRegistrationFacts,
   })
 
-  // --- Live catalog scan ---
-  let refreshTimer: ReturnType<typeof setInterval> | undefined
-
-  ctx.effect(() => () => {
-    if (refreshTimer !== undefined) clearInterval(refreshTimer)
-    refreshTimer = undefined
-  })
-
   /** Scan the Go catalog and swap it into the adapter's view. */
   async function sync(): Promise<void> {
-    const entries = await fetchGoModels()
-    if (entries.length === 0) {
+    // The official CLI catalog owns the two facts the Provider API withholds:
+    // which plan each model belongs to, and which reasoning efforts it takes.
+    // Without it there is no honest Go filter, so a failed scan keeps the
+    // previous catalog instead of guessing plan membership.
+    const next = await fetchGoModels(await fetchCatalog())
+    if (next.length === 0) {
       throw new Error('no Go models found; keeping the previous catalog')
     }
-    // Effort metadata is best-effort: the model list must survive a catalog
-    // hiccup, so a failed catalog fetch degrades to gateway-decided reasoning.
-    let efforts = new Map<string, string[]>()
-    try {
-      efforts = await fetchCatalogEfforts()
-    } catch (error) {
-      ctx.logger.warn('[commandcode-go] effort catalog scan failed: %s', error instanceof Error ? error.message : String(error))
-    }
-    const next = entries.map(entry => ({
-      id: entry.id,
-      name: entry.name,
-      contextWindow: entry.contextWindow,
-      ...(efforts.get(entry.id) === undefined ? {} : { efforts: efforts.get(entry.id)! }),
-    }))
     if (deepEqualJson(next, scanned)) return
     scanned = next
-    ctx.logger.info('[commandcode-go] synced %d Go model(s): %s', next.length, next.map(m => m.id).join(', '))
+    ctx.logger.info('[commandcode-go-provider] synced %d Go model(s): %s', next.length, next.map(m => m.id).join(', '))
   }
 
   void sync().catch((error: unknown) => {
-    ctx.logger.warn('[commandcode-go] initial scan failed: %s', error instanceof Error ? error.message : String(error))
+    ctx.logger.warn('[commandcode-go-provider] initial scan failed: %s', errorChain(error))
   })
-  refreshTimer = setInterval(() => {
-    void sync().catch((error: unknown) => {
-      ctx.logger.warn('[commandcode-go] refresh failed: %s', error instanceof Error ? error.message : String(error))
-    })
-  }, REFRESH_MS)
-  refreshTimer.unref?.()
 }

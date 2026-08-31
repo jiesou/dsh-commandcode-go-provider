@@ -10,7 +10,7 @@
  * owns validation, layering, and credential policy. Model metadata — the
  * scanned Go catalog — flows through `listModels()` / `resolveModel()`.
  *
- * @module commandcode-go/adapter
+ * @module dsh-commandcode-go-provider/adapter
  */
 import { LlmAdapter } from '@deepseek-ai/dsh-llm';
 import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, ResolvedRetryPolicy, StreamChunk } from '@deepseek-ai/dsh-llm';

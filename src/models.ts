@@ -5,22 +5,18 @@
  *
  * The listing endpoint is open (no auth required, and a Go key would be
  * refused here anyway — Go has no Provider-API access). It discloses only
- * `id` / `name` / `context_length`; reasoning-effort support is NOT part of
- * the Provider API, so effort metadata is merged from the model catalog the
+ * `id` / `name` / `context_length`: neither plan membership nor reasoning
+ * support is part of the Provider API. Both come from the model catalog the
  * official `command-code` CLI ships (`dist/bundled/command-code-knowledge/
  * reference/models.md`), fetched live from jsDelivr so it tracks the `latest`
  * release instead of a checked-in snapshot.
  *
- * The Go membership rule mirrors the official plans/go page and the opencode
- * commandcode-go plugin:
- * - All open-source models (deepseek, moonshotai, zai-org, MiniMaxAI, xiaomi,
- *   Qwen, stepfun, tencent, nvidia, thinkingmachines, poolside).
- * - A few premium exceptions included outright: GPT-5.6 Luna, Grok 4.5, and
- *   Muse Spark 1.2 Contributor.
- * - Everything else premium (Claude, other GPTs, Gemini, Grok 4.6, Fugu
- *   Ultra, Muse Spark 1.1 / standard 1.2) is excluded.
+ * Go membership is therefore read, not guessed: the catalog's `Min plan`
+ * column names the lowest plan each model belongs to (`Go and above`, `Pro
+ * and above`, `GOAT and above`, `Max`), which covers the premium models Go
+ * includes outright without a hand-maintained exception list.
  *
- * @module commandcode-go/models
+ * @module dsh-commandcode-go-provider/models
  */
 
 export interface GoModel {
@@ -34,44 +30,27 @@ export interface GoModel {
 /** Context capacity assumed when the listing discloses none. */
 const FALLBACK_CONTEXT_WINDOW = 262_144
 
-/** Premium models included on the Go plan outright (from docs/plans/go). */
-const GO_PREMIUM_EXCEPTIONS: ReadonlySet<string> = new Set([
-  'gpt-5.6-luna',
-  'xai/grok-4.5',
-  'meta/muse-spark-1.2-contributor',
-])
-
-/** Providers whose every model is premium and therefore absent from Go. */
-const PREMIUM_ONLY_PREFIXES = ['google/', 'sakana/', 'anthropic/']
-
-function hasPremiumPrefix(id: string): boolean {
-  for (const prefix of PREMIUM_ONLY_PREFIXES) {
-    if (id.startsWith(prefix)) return true
-  }
-  return false
+/** One row of the official CLI catalog (`reference/models.md`). */
+export interface CatalogEntry {
+  /** Lowest plan that includes the model, verbatim (`Go and above`, `Max`, …). */
+  minPlan: string
+  /** Reasoning-effort ids the gateway accepts, in catalog order; absent when the model decides. */
+  efforts?: string[]
 }
 
-/** Whether a model id is part of the Go plan. */
-export function isGoModel(id: string): boolean {
-  if (GO_PREMIUM_EXCEPTIONS.has(id)) return true
-  if (hasPremiumPrefix(id)) return false
-  const slash = id.indexOf('/')
-  const short = slash === -1 ? id : id.slice(slash + 1)
-  // Any remaining model whose short id begins with a premium brand is excluded
-  // even when the full id lacks a telling prefix (defensive: keep the catalog
-  // honest against upstream listing changes).
-  const premiumBrands = [
-    'claude-',
-    'gpt-',
-    'gemini-',
-    'grok-',
-    'fugu-',
-    'muse-spark-',
-  ]
-  for (const brand of premiumBrands) {
-    if (short.startsWith(brand)) return false
-  }
-  return true
+/** Whether a catalog row's `Min plan` column includes the Go plan. */
+export function isGoPlan(entry: CatalogEntry | undefined): boolean {
+  return entry?.minPlan.split(/\s+/)[0] === 'Go'
+}
+
+/**
+ * The listing reuses one display name across the paid and free tier of the
+ * same model (`MiniMaxAI/MiniMax-M3` and `minimax/minimax-m3-free` are both
+ * "MiniMax M3"). Free tiers are marked by a `-free` id suffix, so surface that
+ * in the name to keep the two apart.
+ */
+export function displayName(id: string, name: string): string {
+  return id.endsWith('-free') && !/free/i.test(name) ? `${name} (free)` : name
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -101,18 +80,19 @@ function parseEfforts(raw: string): string[] | undefined {
     .filter((part) => part.length > 0)
 }
 
-/** Parse `reference/models.md` rows into model id → effort list. */
-export function parseCatalogEfforts(markdown: string): Map<string, string[]> {
-  const byId = new Map<string, string[]>()
+/** Parse `reference/models.md` rows into model id → catalog entry. */
+export function parseCatalog(markdown: string): Map<string, CatalogEntry> {
+  const byId = new Map<string, CatalogEntry>()
   // Row shape: | `id` | Name | Context | Efforts | $/1M … | Min plan | Best for |
   for (const line of markdown.split('\n')) {
     if (!line.trimStart().startsWith('|')) continue
     const cells = line.split('|').map((cell) => cell.trim())
-    const id = cells[1]?.replace(/^`|`$/g, '')
-    const efforts = cells[4]
-    if (id === undefined || efforts === undefined) continue
-    const parsed = parseEfforts(efforts)
-    if (parsed !== undefined) byId.set(id, parsed)
+    // Only data rows quote their id, which skips header and separator rows.
+    const id = cells[1]?.startsWith('`') === true ? cells[1].replace(/`/g, '') : undefined
+    const minPlan = nonEmptyString(cells[6])
+    if (id === undefined || minPlan === undefined) continue
+    const efforts = parseEfforts(cells[4] ?? '')
+    byId.set(id, { minPlan, ...efforts === undefined ? {} : { efforts } })
   }
   return byId
 }
@@ -120,31 +100,33 @@ export function parseCatalogEfforts(markdown: string): Map<string, string[]> {
 const DEFAULT_MODELS_URL = 'https://api.commandcode.ai/provider/v1/models'
 /** Official CLI catalog served from npm; `@latest` tracks new releases. */
 const CATALOG_URL = 'https://cdn.jsdelivr.net/npm/command-code@latest/dist/bundled/command-code-knowledge/reference/models.md'
-/** Single-request fetch budget for the catalog (the API listing is separate). */
-const CATALOG_TIMEOUT_MS = 30_000
+/** Per-request fetch budget for the upstream catalog endpoints. */
+const FETCH_TIMEOUT_MS = 30_000
 
-/** Fetch the official CLI catalog and extract per-model reasoning efforts. */
-export async function fetchCatalogEfforts(
+/** Fetch the official CLI catalog: per-model plan membership and reasoning efforts. */
+export async function fetchCatalog(
   url: string = CATALOG_URL,
   fetchImpl: typeof fetch = fetch,
-): Promise<Map<string, string[]>> {
+): Promise<Map<string, CatalogEntry>> {
   const response = await fetchImpl(url, {
     headers: { accept: 'text/markdown' },
-    signal: AbortSignal.timeout(CATALOG_TIMEOUT_MS),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   })
   if (!response.ok) {
     throw new Error(`Command Code catalog answered HTTP ${response.status}`)
   }
-  return parseCatalogEfforts(await response.text())
+  return parseCatalog(await response.text())
 }
 
-/** Fetch the full catalog and filter to Go-usable models. */
+/** Fetch the live listing and keep the models the catalog puts on the Go plan. */
 export async function fetchGoModels(
+  catalog: ReadonlyMap<string, CatalogEntry>,
   url: string = DEFAULT_MODELS_URL,
   fetchImpl: typeof fetch = fetch,
 ): Promise<GoModel[]> {
   const response = await fetchImpl(url, {
     headers: { accept: 'application/json' },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   })
   if (!response.ok) {
     throw new Error(`Command Code models endpoint answered HTTP ${response.status}`)
@@ -157,12 +139,13 @@ export async function fetchGoModels(
   for (const raw of payload.data) {
     if (!isRecord(raw)) continue
     const id = nonEmptyString(raw.id)
-    if (id === undefined || !isGoModel(id)) continue
-    const name = nonEmptyString(raw.name) ?? id.split('/').pop() ?? id
+    const entry = id === undefined ? undefined : catalog.get(id)
+    if (id === undefined || !isGoPlan(entry)) continue
+    const name = displayName(id, nonEmptyString(raw.name) ?? id.split('/').pop() ?? id)
     const contextWindow = positiveNumber(raw.context_length)
       ?? positiveNumber(raw.context_window)
       ?? FALLBACK_CONTEXT_WINDOW
-    models.push({ id, name, contextWindow })
+    models.push({ id, name, contextWindow, ...entry?.efforts === undefined ? {} : { efforts: entry.efforts } })
   }
   // Stable order keeps the diff against a persisted catalog deterministic.
   models.sort((a, b) => a.id.localeCompare(b.id))
