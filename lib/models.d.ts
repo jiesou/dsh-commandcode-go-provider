@@ -24,7 +24,11 @@ export interface GoModel {
     contextWindow: number;
     /** Reasoning-effort ids the gateway accepts for this model, in display order. */
     efforts?: string[];
+    /** Whether the model accepts image input per the official CLI's own vision data. */
+    imageInput: boolean;
 }
+/** Whether a model id accepts image input under the official CLI's classification. */
+export declare function imageCapable(id: string): boolean;
 /** One row of the official CLI catalog (`reference/models.md`). */
 export interface CatalogEntry {
     /** Lowest plan that includes the model, verbatim (`Go and above`, `Max`, …). */

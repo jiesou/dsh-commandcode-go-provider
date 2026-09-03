@@ -1,6 +1,6 @@
 {
   "name": "@jiesou/dsh-commandcode-go-provider",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Command Code Go provider adapter for dsh: scan the Go-plan model catalog dynamically and serve /alpha/generate through the harness LLM seam",
   "type": "module",
   "main": "lib/index.js",
@@ -49,6 +49,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.1 <5",
+    "@deepseek-ai/dsh-attachment": ">=0.1.1-rc.2 <0.2",
     "@deepseek-ai/dsh-credentials": ">=0.1.1-rc.2 <0.2",
     "@deepseek-ai/dsh-launch-environment": ">=0.1.1-rc.2 <0.2",
     "@deepseek-ai/dsh-llm": ">=0.1.1-rc.2 <0.2",

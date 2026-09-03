@@ -16,7 +16,8 @@
  *
  * @module dsh-commandcode-go-provider/protocol
  */
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm';
+import type { GenerateOptions, Message, StreamChunk } from '@deepseek-ai/dsh-llm';
+import type { ImageAttachmentRef, RequestImageAttachment } from '@deepseek-ai/dsh-attachment';
 /** Gateway version pinned to a known-good Command Code CLI release. */
 export declare const CC_VERSION = "0.26.20";
 /** Last-resort output cap when a request carries no maxTokens (matches the adapter default). */
@@ -62,9 +63,18 @@ interface CcToolResultContent {
         value: string;
     };
 }
+/** One user-content part: text or an inline base64 image. */
+type CcUserPart = {
+    type: 'text';
+    text: string;
+} | {
+    type: 'image';
+    image: string;
+    mimeType: string;
+};
 type CcMessage = {
     role: 'user';
-    content: string | unknown[];
+    content: string | CcUserPart[];
 } | {
     role: 'assistant';
     content: Array<{
@@ -78,6 +88,8 @@ type CcMessage = {
     role: 'tool';
     content: CcToolResultContent[];
 };
+/** Resolved request bytes per attachment id, prepared by the adapter before serialization. */
+export type RequestImages = ReadonlyMap<string, RequestImageAttachment>;
 interface CcTool {
     type: 'function';
     name: string;
@@ -112,8 +124,13 @@ interface CcRequestEnvelope {
         reasoning_effort?: string;
     };
 }
+/**
+ * The ordered, de-duplicated image refs a request needs bytes for, rejecting
+ * images in roles the gateway cannot carry (assistant history).
+ */
+export declare function collectRequestImages(messages: readonly Message[]): ImageAttachmentRef[];
 /** Build the gateway request envelope for one harness call. */
-export declare function buildRequest(options: GenerateOptions): CcRequestEnvelope;
+export declare function buildRequest(options: GenerateOptions, images?: RequestImages): CcRequestEnvelope;
 /**
  * Translate one gateway stream event into one or more harness StreamChunks.
  * @returns an empty array when the event has no harness representation.

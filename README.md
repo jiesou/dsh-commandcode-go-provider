@@ -58,6 +58,38 @@ echo 'COMMANDCODE_API_KEY: [your key, be like user_xxxx]' >> ~/.dsh/.credentials
 | `baseURL` | `string` | `"https://api.commandcode.ai"` | Command Code 网关 base URL，`/alpha/generate` 自动追加 |
 | `maxTokens` | `number` | `64000` | 单次请求输出 token 上限 |
 | `defaultContextWindow` | `number` | `1000000` | 模型无精确 contextWindow 时的兜底值 |
+| `accounts` | `object` | `{}` | 多账号字典：每个 key 是一个独立 provider 路由。缺省或空 = 单账号模式，直接使用顶层字段 |
+
+### 多账号
+
+`accounts` 字典把同一个 Go 计划的多个账号暴露成多个独立 provider（模型选择器里各占一项，各持各的 API Key）。每个账号字段缺省时回退到顶层同名字段，`displayName` 缺省用账号 key：
+
+```yaml
+- id: commandcode-go-provider
+  name: '@jiesou/dsh-commandcode-go-provider'
+  config:
+    accounts:
+      commandcode-1:
+        displayName: Command Code Go 1
+        apiKeyEnv: COMMANDCODE_API_KEY
+      commandcode-2:
+        displayName: Command Code Go 2
+        apiKeyEnv: COMMANDCODE_API_KEY_2
+    baseURL: https://api.commandcode.ai
+    retryPolicy:
+      mode: always
+```
+
+| 账号字段 | 类型 | 缺省 | 说明 |
+| --- | --- | --- | --- |
+| `displayName` | `string` | 账号 key | 模型选择器里的显示名 |
+| `apiKeyEnv` | `string` | 顶层 `apiKeyEnv` | 该账号的 credential ref，在 Web Models 页对应账号卡片里写入 |
+| `baseURL` | `string` | 顶层 `baseURL` | 覆盖该账号的网关地址 |
+| `maxTokens` | `number` | 顶层 `maxTokens` | 覆盖该账号的输出上限 |
+| `defaultContextWindow` | `number` | 顶层 `defaultContextWindow` | 覆盖该账号的兜底容量 |
+| `retryPolicy` | `object` | 顶层 `retryPolicy` | 覆盖该账号的重试策略 |
+
+模型目录只扫描一次、所有账号共享；改动设置后下个请求即生效，无需重启。把 `accounts` 清空或删掉即回到单账号模式。
 
 Reasoning effort 不需要配置：档位来自官方 CLI catalog，模型只暴露它真正接受的档位（`low`/`medium`/`high`/`xhigh`/`max`），加一个显式 `Off` 入口。**Default** 表示"不发送 `reasoning_effort`"字段，由上游自行决定深度。**Off** 与 Default 的 wire 形态一致，但显式声明"不推理"的意图。catalog 里档位为空的模型干脆不显示档位选择器。
 

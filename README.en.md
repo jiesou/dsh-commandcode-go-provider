@@ -60,6 +60,38 @@ All fields optional, defaults work out of the box:
 | `baseURL` | `string` | `"https://api.commandcode.ai"` | Command Code gateway base URL; `/alpha/generate` is appended |
 | `maxTokens` | `number` | `64000` | Per-request output token cap |
 | `defaultContextWindow` | `number` | `1000000` | Fallback context capacity when a model has no exact value |
+| `accounts` | `object` | `{}` | Multi-account dictionary: each key is an independent provider route. Absent or empty = single-account mode driven by the top-level fields |
+
+### Multiple accounts
+
+The `accounts` dictionary exposes several accounts of the same Go plan as several independent providers (each gets its own entry in the model picker and holds its own API key). Every account field falls back to the top-level field of the same name; `displayName` defaults to the account key:
+
+```yaml
+- id: commandcode-go-provider
+  name: '@jiesou/dsh-commandcode-go-provider'
+  config:
+    accounts:
+      commandcode-1:
+        displayName: Command Code Go 1
+        apiKeyEnv: COMMANDCODE_API_KEY
+      commandcode-2:
+        displayName: Command Code Go 2
+        apiKeyEnv: COMMANDCODE_API_KEY_2
+    baseURL: https://api.commandcode.ai
+    retryPolicy:
+      mode: always
+```
+
+| Account field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `displayName` | `string` | account key | Label shown in the model picker |
+| `apiKeyEnv` | `string` | top-level `apiKeyEnv` | Credential ref for this account, written through its card on the web Models page |
+| `baseURL` | `string` | top-level `baseURL` | Per-account gateway override |
+| `maxTokens` | `number` | top-level `maxTokens` | Per-account output cap override |
+| `defaultContextWindow` | `number` | top-level `defaultContextWindow` | Per-account fallback capacity override |
+| `retryPolicy` | `object` | top-level `retryPolicy` | Per-account retry policy override |
+
+The model catalog is scanned once and shared by every account; settings changes apply to the next request without a restart. Empty or remove `accounts` to go back to the single-account shape.
 
 Reasoning effort needs no configuration: levels come from the official CLI catalog, and a model exposes exactly the levels it accepts (`low`/`medium`/`high`/`xhigh`/`max`), plus an explicit `Off` entry. **Default** means "do not send `reasoning_effort`" — the gateway decides the depth. **Off** is the same wire shape as Default but pins the intent explicitly. A model the catalog leaves blank shows no level selector at all.
 

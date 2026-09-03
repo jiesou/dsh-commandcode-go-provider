@@ -17,7 +17,7 @@
  * @module dsh-commandcode-go-provider/protocol
  */
 
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { CallId, contentHasImage, LlmError } from '@deepseek-ai/dsh-llm'
 import type {
   ContentBlock,
   FinishReason,
@@ -26,6 +26,7 @@ import type {
   StreamChunk,
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
+import type { ImageAttachmentRef, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { platform, arch } from 'node:os'
 
 /** Gateway version pinned to a known-good Command Code CLI release. */
@@ -83,10 +84,16 @@ interface CcToolResultContent {
   output: { type: 'text' | 'error-text'; value: string }
 }
 
+/** One user-content part: text or an inline base64 image. */
+type CcUserPart = { type: 'text'; text: string } | { type: 'image'; image: string; mimeType: string }
+
 type CcMessage =
-  | { role: 'user'; content: string | unknown[] }
+  | { role: 'user'; content: string | CcUserPart[] }
   | { role: 'assistant'; content: Array<{ type: 'text'; text: string } | { type: 'reasoning'; text: string } | CcToolCallContent> }
   | { role: 'tool'; content: CcToolResultContent[] }
+
+/** Resolved request bytes per attachment id, prepared by the adapter before serialization. */
+export type RequestImages = ReadonlyMap<string, RequestImageAttachment>
 
 interface CcTool {
   type: 'function'
@@ -136,6 +143,19 @@ function flattenText(blocks: ContentBlock[]): string {
     .join('')
 }
 
+/** The attachment refs of the image blocks in one content list. */
+function imageRefs(blocks: readonly ContentBlock[]): ImageAttachmentRef[] {
+  return blocks
+    .filter((block): block is Extract<ContentBlock, { type: 'image' }> => block.type === 'image')
+    .map(block => block.attachment)
+}
+
+/**
+ * The text value of one tool result. Images nested in it are deliberately not
+ * carried here: the gateway's tool output is text-only, so they ride the user
+ * turn {@link serializeUser} appends after it. A text-only route never sees
+ * them at all — the harness projects nested images to placeholder text first.
+ */
 function toolResultOutput(
   result: Extract<ContentBlock, { type: 'tool-result' }>,
 ): CcToolResultContent['output'] {
@@ -152,6 +172,8 @@ function serializeAssistant(message: Message): Extract<CcMessage, { role: 'assis
       parts.push({ type: 'text', text: block.text })
     } else if (block.type === 'reasoning') {
       parts.push({ type: 'reasoning', text: block.text })
+    } else if (block.type === 'image') {
+      throw new LlmError('the gateway cannot represent an image in assistant history', 'UNSUPPORTED_CONTENT')
     } else if (block.type === 'tool-call') {
       parts.push({
         type: 'tool-call',
@@ -172,27 +194,81 @@ function safeParseJson(raw: string): unknown {
   }
 }
 
-function serializeUser(message: Message): CcMessage {
-  const toolResults = message.content.filter(
-    (block): block is Extract<ContentBlock, { type: 'tool-result' }> => block.type === 'tool-result',
-  )
-  const text = flattenText(message.content)
-  if (text.length > 0 || toolResults.length === 0) {
-    return { role: 'user', content: text }
+/** One inline image part, in the exact wire shape the CLI's `toWireMessages` emits. */
+function imagePart(ref: ImageAttachmentRef, images: RequestImages | undefined): CcUserPart {
+  const version = images?.get(ref.attachmentId)
+  if (version === undefined) {
+    throw new LlmError(`no request bytes resolved for image attachment ${ref.attachmentId}`, 'MISSING_ATTACHMENT')
   }
   return {
-    role: 'tool',
-    content: toolResults.map(result => ({
-      type: 'tool-result' as const,
-      toolCallId: result.toolCallId,
-      toolName: 'unknown',
-      output: toolResultOutput(result),
-    })),
+    type: 'image',
+    image: `data:${version.mediaType};base64,${Buffer.from(version.data).toString('base64')}`,
+    mimeType: version.mediaType,
   }
 }
 
+/**
+ * One harness user message as gateway turns. Images a tool returned cannot
+ * ride the gateway's text-only tool output, so they follow the results as a
+ * plain user turn — the only role the gateway carries inline images in.
+ */
+function serializeUser(message: Message, images: RequestImages | undefined): CcMessage[] {
+  const toolResults = message.content.filter(
+    (block): block is Extract<ContentBlock, { type: 'tool-result' }> => block.type === 'tool-result',
+  )
+  const nested = toolResults.flatMap(result => imageRefs(result.content))
+  if (toolResults.length > 0 && flattenText(message.content).length === 0) {
+    const wire: CcMessage[] = [{
+      role: 'tool',
+      content: toolResults.map(result => ({
+        type: 'tool-result' as const,
+        toolCallId: result.toolCallId,
+        toolName: 'unknown',
+        output: toolResultOutput(result),
+      })),
+    }]
+    if (nested.length > 0) wire.push({ role: 'user', content: nested.map(ref => imagePart(ref, images)) })
+    return wire
+  }
+  // Text and image parts keep their block order, like the CLI's own user
+  // serialization; a text-only message keeps the flat string shape.
+  const parts: CcUserPart[] = []
+  for (const block of message.content) {
+    if (block.type === 'text') parts.push({ type: 'text', text: block.text })
+    else if (block.type === 'image') parts.push(imagePart(block.attachment, images))
+  }
+  for (const ref of nested) parts.push(imagePart(ref, images))
+  if (parts.every(part => part.type === 'text')) {
+    return [{ role: 'user', content: parts.map(part => (part as { text: string }).text).join('') }]
+  }
+  return [{ role: 'user', content: parts }]
+}
+
+/**
+ * The ordered, de-duplicated image refs a request needs bytes for, rejecting
+ * images in roles the gateway cannot carry (assistant history).
+ */
+export function collectRequestImages(messages: readonly Message[]): ImageAttachmentRef[] {
+  const refs = new Map<string, ImageAttachmentRef>()
+  for (const message of messages) {
+    if (message.role !== 'user' && contentHasImage(message.content)) {
+      throw new LlmError(
+        `a ${message.role} message carries an image the gateway cannot replay`,
+        'UNSUPPORTED_CONTENT',
+      )
+    }
+    for (const ref of [
+      ...imageRefs(message.content),
+      ...message.content.flatMap(block => block.type === 'tool-result' ? imageRefs(block.content) : []),
+    ]) {
+      refs.set(ref.attachmentId, ref)
+    }
+  }
+  return [...refs.values()]
+}
+
 /** Build the gateway request envelope for one harness call. */
-export function buildRequest(options: GenerateOptions): CcRequestEnvelope {
+export function buildRequest(options: GenerateOptions, images?: RequestImages): CcRequestEnvelope {
   let system = options.system ?? ''
   const messages: CcMessage[] = []
   for (const message of options.messages) {
@@ -200,7 +276,8 @@ export function buildRequest(options: GenerateOptions): CcRequestEnvelope {
       system += (system ? '\n\n' : '') + flattenText(message.content)
       continue
     }
-    messages.push(message.role === 'assistant' ? serializeAssistant(message) : serializeUser(message))
+    if (message.role === 'assistant') messages.push(serializeAssistant(message))
+    else messages.push(...serializeUser(message, images))
   }
 
   const tools: CcTool[] = (options.tools ?? [])

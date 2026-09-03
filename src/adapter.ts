@@ -4,11 +4,12 @@
  * endpoint a Go-plan subscription can call (the OpenAI-compatible Provider
  * API answers 403 for Go).
  *
- * The adapter is transport-only: connection facts (base URL, catalog,
- * reasoning defaults) arrive through a thunk resolved once per operation and
- * the bearer key through a per-request resolver, so the registering plugin
- * owns validation, layering, and credential policy. Model metadata — the
- * scanned Go catalog — flows through `listModels()` / `resolveModel()`.
+ * The adapter is transport-only: per-account connection facts (display name,
+ * base URL, key reference) arrive through a route-aware thunk resolved once
+ * per operation and the bearer key through a per-route resolver, so the
+ * registering plugin owns validation, layering, and credential policy. Model
+ * metadata — the scanned Go catalog, shared by every account — flows through
+ * `listModels()` / `resolveModel()`.
  *
  * @module dsh-commandcode-go-provider/adapter
  */
@@ -34,10 +35,12 @@ import type {
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
+import type { AttachmentStore, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import {
   buildRequest,
   CC_VERSION,
+  collectRequestImages,
   DEFAULT_MAX_TOKENS,
   eventToChunks,
   GATEWAY_EFFORTS,
@@ -45,6 +48,7 @@ import {
   parseEventStream,
   streamErrorDetail,
 } from './protocol.js'
+import type { RequestImages } from './protocol.js'
 
 /** One catalog model advertised by the adapter. */
 export interface CommandCodeGoModel {
@@ -58,10 +62,14 @@ export interface CommandCodeGoModel {
   maxTokens?: number
   /** Reasoning-effort ids the gateway accepts for this model, in display order. */
   efforts?: string[]
+  /** Whether the model accepts image input; absent means unknown (no modality is declared). */
+  imageInput?: boolean
 }
 
-/** Validated connection facts for one operation. */
+/** Validated connection facts for one account (one provider route). */
 export interface CommandCodeGoConnectionOptions {
+  /** Picker/directory label for this account. */
+  displayName: string
   /** Credential reference resolved per request. */
   apiKeyEnv: CredentialRef
   /** Gateway base URL; `/alpha/generate` is appended. */
@@ -78,10 +86,15 @@ export interface CommandCodeGoConnectionOptions {
 
 /** Constructor options for {@link CommandCodeGoAdapter}. */
 export interface CommandCodeGoAdapterOptions {
-  /** Current validated connection facts; called once per operation. */
-  options: () => CommandCodeGoConnectionOptions
-  /** Resolve the bearer token for one request; throws `MISSING_CREDENTIAL` when unavailable. */
-  resolveApiKey: () => Promise<string>
+  /** Current validated connection facts for one account; called once per operation. */
+  account: (provider: string) => CommandCodeGoConnectionOptions
+  /** Resolve the bearer token for one account; throws `MISSING_CREDENTIAL` when unavailable. */
+  resolveApiKey: (provider: string) => Promise<string>
+  /**
+   * The durable attachment service, resolved lazily so a deployment without
+   * one keeps working for text-only traffic.
+   */
+  resolveAttachments?: () => AttachmentStore | undefined
 }
 
 /** Default maximum idle interval while an adapter stream read is outstanding. */
@@ -92,6 +105,12 @@ export { DEFAULT_MAX_TOKENS }
 
 const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 
+/**
+ * Per-image request budget, matching the official pi-ai adapter's defaults:
+ * the full 2048px normalized attachment, re-encoded to fit 1MiB per image.
+ */
+const REQUEST_IMAGE_POLICY = { maxPixels: 4_194_304, maxBytes: 1_048_576 }
+
 function effortInfo(effort: string): { id: ReturnType<typeof ReasoningEffortId>, name: string } {
   return { id: ReasoningEffortId(effort), name: GATEWAY_EFFORTS[effort] ?? effort }
 }
@@ -101,7 +120,11 @@ function modelInfo(provider: string, model: CommandCodeGoModel): LlmModelInfo {
     provider,
     id: model.id,
     name: model.name ?? model.id,
-    inputModalities: ['text'],
+    // An explicit omission is negative capability; an unknown model declares
+    // nothing rather than guessing the endpoint (the two wrong answers do not
+    // cost the same: over-claiming leaves a durable message no request can
+    // replay, under-claiming refuses the image while it is still cheap).
+    ...model.imageInput === undefined ? {} : { inputModalities: model.imageInput ? ['text', 'image'] : ['text'] },
   }
 }
 
@@ -127,8 +150,8 @@ function reasoningFor(model: CommandCodeGoModel | undefined): LlmModelReasoningI
 }
 
 /**
- * Command Code Go adapter. One instance serves every model in the scanned Go
- * catalog; the harness model id IS the gateway wire model id.
+ * Command Code Go adapter. One instance serves every configured account; the
+ * harness model id IS the gateway wire model id.
  */
 export class CommandCodeGoAdapter extends LlmAdapter {
   private readonly config: CommandCodeGoAdapterOptions
@@ -138,16 +161,35 @@ export class CommandCodeGoAdapter extends LlmAdapter {
     this.config = config
   }
 
-  override providerInfo(provider: string): LlmProviderInfo {
-    return { id: provider, name: 'Command Code Go' }
+  /**
+   * Resolve the request bytes for every image in the conversation. The
+   * attachment service is optional: a deployment without one keeps serving
+   * text-only traffic and fails loud only when an image actually arrives.
+   */
+  private async prepareRequestImages(
+    messages: GenerateOptions['messages'],
+    signal: AbortSignal | undefined,
+  ): Promise<RequestImages | undefined> {
+    const refs = collectRequestImages(messages)
+    if (refs.length === 0) return undefined
+    const attachments = this.config.resolveAttachments?.()
+    if (attachments === undefined) {
+      throw new LlmError('image input requires the durable attachment service', 'UNSUPPORTED_CONTENT')
+    }
+    const versions = await Promise.all(refs.map(ref => attachments.readImageRequest(ref, REQUEST_IMAGE_POLICY, signal)))
+    return new Map(versions.map(version => [version.attachment.attachmentId, version]))
   }
 
-  override providerRetryPolicy(_provider: string): ResolvedRetryPolicy {
-    return this.config.options().retryPolicy
+  override providerInfo(provider: string): LlmProviderInfo {
+    return { id: provider, name: this.config.account(provider).displayName }
+  }
+
+  override providerRetryPolicy(provider: string): ResolvedRetryPolicy {
+    return this.config.account(provider).retryPolicy
   }
 
   override listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    return Promise.resolve(this.config.options().models.map(model => modelInfo(provider, model)))
+    return Promise.resolve(this.config.account(provider).models.map(model => modelInfo(provider, model)))
   }
 
   override resolveModel(
@@ -155,7 +197,7 @@ export class CommandCodeGoAdapter extends LlmAdapter {
     model: string,
     _signal?: AbortSignal,
   ): Promise<LlmResolvedModelInfo> {
-    const connection = this.config.options()
+    const connection = this.config.account(provider)
     const configured = connection.models.find(entry => entry.id === model)
     const info = configured === undefined
       ? modelInfo(provider, { id: model, name: model })
@@ -170,8 +212,8 @@ export class CommandCodeGoAdapter extends LlmAdapter {
   }
 
   async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const connection = this.config.options()
-    const apiKey = await this.config.resolveApiKey()
+    const connection = this.config.account(options.provider)
+    const apiKey = await this.config.resolveApiKey(options.provider)
     const consumer = new AbortController()
     const upstream = options.signal === undefined
       ? consumer.signal
@@ -228,7 +270,8 @@ export class CommandCodeGoAdapter extends LlmAdapter {
     connection: CommandCodeGoConnectionOptions,
     apiKey: string,
   ): AsyncIterable<StreamChunk> {
-    const body = buildRequest(options)
+    const images = await this.prepareRequestImages(options.messages, signal)
+    const body = buildRequest(options, images)
     const payload = JSON.stringify(body)
     const headers: Record<string, string> = {
       'authorization': `Bearer ${apiKey}`,
