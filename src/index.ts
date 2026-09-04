@@ -29,7 +29,8 @@ import { assertUsableApiKey, errorChain, LlmError, resolveRetryPolicy, RetryPoli
 import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
-import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
+import type {} from '@deepseek-ai/dsh-settings'
 import { CommandCodeGoAdapter, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, DEFAULT_STREAM_IDLE_TIMEOUT_MS } from './adapter.js'
 import type { CommandCodeGoConnectionOptions, CommandCodeGoModel } from './adapter.js'
 import { fetchCatalog, fetchGoModels } from './models.js'
@@ -43,13 +44,15 @@ export {
 export type { CommandCodeGoAdapterOptions, CommandCodeGoConnectionOptions, CommandCodeGoModel } from './adapter.js'
 export { fetchCatalog, fetchGoModels, imageCapable, isGoPlan, parseCatalog } from './models.js'
 export type { CatalogEntry, GoModel } from './models.js'
+export { chunkState } from './protocol.js'
+export type { ChunkState } from './protocol.js'
 
 export const name = 'commandcode-go-provider'
-export const inject = ['llm', 'settings']
+export const inject = ['llm']
 
 const DEFAULT_PROVIDER = 'commandcode'
 const DEFAULT_DISPLAY_NAME = 'Command Code Go'
-const DEFAULT_SETTINGS_NS = settingsNamespace('commandcode-go-provider')
+const DEFAULT_SETTINGS_NS = 'commandcode-go-provider'
 const DEFAULT_API_KEY_ENV = 'COMMANDCODE_API_KEY'
 
 /** Default gateway base; `/alpha/generate` is appended. */
@@ -253,22 +256,24 @@ export function apply(ctx: Context, config: Config): void {
   ensureDirectory()
   ensureRegistrationFacts()
 
-  installSettingsSection(ctx, DEFAULT_SETTINGS_NS, Config, config, {
-    setSource: (source) => {
-      current = source
-    },
-    onChange: () => {
-      try {
-        ensureRegistrationFacts()
-      } catch (error: unknown) {
-        ctx.logger.error('[commandcode-go-provider] keeping the previously registered routes after a refused update: %s', errorChain(error))
-      }
-      try {
-        ensureDirectory()
-      } catch (error: unknown) {
-        ctx.logger.error('[commandcode-go-provider] keeping the previous configurable-provider directory after a refused update: %s', errorChain(error))
-      }
-    },
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.installSection(ctx, DEFAULT_SETTINGS_NS, Config, config, {
+      setSource: (source) => {
+        current = source
+      },
+      onChange: () => {
+        try {
+          ensureRegistrationFacts()
+        } catch (error: unknown) {
+          ctx.logger.error('[commandcode-go-provider] keeping the previously registered routes after a refused update: %s', errorChain(error))
+        }
+        try {
+          ensureDirectory()
+        } catch (error: unknown) {
+          ctx.logger.error('[commandcode-go-provider] keeping the previous configurable-provider directory after a refused update: %s', errorChain(error))
+        }
+      },
+    })
   })
 
   /** Scan the Go catalog and swap it into the adapter's view. */

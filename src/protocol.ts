@@ -17,7 +17,7 @@
  * @module dsh-commandcode-go-provider/protocol
  */
 
-import { CallId, contentHasImage, LlmError } from '@deepseek-ai/dsh-llm'
+import { contentHasImage, LlmError, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type {
   ContentBlock,
   FinishReason,
@@ -208,17 +208,22 @@ function imagePart(ref: ImageAttachmentRef, images: RequestImages | undefined): 
 }
 
 /**
- * One harness user message as gateway turns. Images a tool returned cannot
- * ride the gateway's text-only tool output, so they follow the results as a
- * plain user turn — the only role the gateway carries inline images in.
+ * One harness user message as gateway turns. Like the CLI's own
+ * `toWireMessages`, tool results ALWAYS serialize to their own `tool` turn,
+ * even when text/images share the message (a read_image result next to
+ * steering text, parallel results folded into one turn): dropping one leaves
+ * its assistant tool-call unmatched and the gateway answers "Tool result is
+ * missing for tool call …". Images a tool returned cannot ride the gateway's
+ * text-only tool output, so they follow the results as a plain user turn —
+ * the only role the gateway carries inline images in.
  */
 function serializeUser(message: Message, images: RequestImages | undefined): CcMessage[] {
+  const wire: CcMessage[] = []
   const toolResults = message.content.filter(
     (block): block is Extract<ContentBlock, { type: 'tool-result' }> => block.type === 'tool-result',
   )
-  const nested = toolResults.flatMap(result => imageRefs(result.content))
-  if (toolResults.length > 0 && flattenText(message.content).length === 0) {
-    const wire: CcMessage[] = [{
+  if (toolResults.length > 0) {
+    wire.push({
       role: 'tool',
       content: toolResults.map(result => ({
         type: 'tool-result' as const,
@@ -226,9 +231,7 @@ function serializeUser(message: Message, images: RequestImages | undefined): CcM
         toolName: 'unknown',
         output: toolResultOutput(result),
       })),
-    }]
-    if (nested.length > 0) wire.push({ role: 'user', content: nested.map(ref => imagePart(ref, images)) })
-    return wire
+    })
   }
   // Text and image parts keep their block order, like the CLI's own user
   // serialization; a text-only message keeps the flat string shape.
@@ -237,11 +240,15 @@ function serializeUser(message: Message, images: RequestImages | undefined): CcM
     if (block.type === 'text') parts.push({ type: 'text', text: block.text })
     else if (block.type === 'image') parts.push(imagePart(block.attachment, images))
   }
-  for (const ref of nested) parts.push(imagePart(ref, images))
-  if (parts.every(part => part.type === 'text')) {
-    return [{ role: 'user', content: parts.map(part => (part as { text: string }).text).join('') }]
+  for (const result of toolResults) {
+    for (const ref of imageRefs(result.content)) parts.push(imagePart(ref, images))
   }
-  return [{ role: 'user', content: parts }]
+  if (parts.length > 0) {
+    wire.push(parts.every(part => part.type === 'text')
+      ? { role: 'user', content: parts.map(part => (part as { text: string }).text).join('') }
+      : { role: 'user', content: parts })
+  }
+  return wire
 }
 
 /**
@@ -267,18 +274,47 @@ export function collectRequestImages(messages: readonly Message[]): ImageAttachm
   return [...refs.values()]
 }
 
+/**
+ * Whether a wire turn is a textless image-only user turn. Only the nested
+ * image fallout of tool results is ever deferred past a tool run; turns
+ * carrying text keep their position.
+ */
+function isImageOnlyUserTurn(turn: CcMessage): boolean {
+  return turn.role === 'user'
+    && Array.isArray(turn.content)
+    && turn.content.length > 0
+    && turn.content.every(part => part.type === 'image')
+}
+
 /** Build the gateway request envelope for one harness call. */
 export function buildRequest(options: GenerateOptions, images?: RequestImages): CcRequestEnvelope {
   let system = options.system ?? ''
   const messages: CcMessage[] = []
+  // Image-only user turns split from tool results (nested read_image bytes)
+  // must not land between tool turns: the gateway ends tool collection at
+  // the first user turn and rejects any later result with "Tool result is
+  // missing for tool call …". Hold them until the tool run ends instead.
+  const deferred: CcMessage[] = []
+  const flushDeferred = (): void => {
+    if (deferred.length > 0) messages.push(...deferred.splice(0))
+  }
+  const pushTurn = (turn: CcMessage): void => {
+    if (isImageOnlyUserTurn(turn) && messages[messages.length - 1]?.role === 'tool') {
+      deferred.push(turn)
+      return
+    }
+    if (turn.role !== 'tool') flushDeferred()
+    messages.push(turn)
+  }
   for (const message of options.messages) {
     if (message.role === 'system') {
       system += (system ? '\n\n' : '') + flattenText(message.content)
       continue
     }
-    if (message.role === 'assistant') messages.push(serializeAssistant(message))
-    else messages.push(...serializeUser(message, images))
+    if (message.role === 'assistant') pushTurn(serializeAssistant(message))
+    else for (const turn of serializeUser(message, images)) pushTurn(turn)
   }
+  flushDeferred()
 
   const tools: CcTool[] = (options.tools ?? [])
     .map((tool: ToolSchema) => ({
@@ -324,33 +360,90 @@ export function buildRequest(options: GenerateOptions, images?: RequestImages): 
 }
 
 /**
+ * Mutable per-stream translation state, owned by the adapter and threaded
+ * through every {@link eventToChunks} call in arrival order.
+ *
+ * The harness invariant requires every delta to address an open block of its
+ * own type and the stream to finish with no open block, while the gateway's
+ * `reasoning-end` / `text-end` events carry no content — so delta text is
+ * accumulated here to assemble the closing `block-end`.
+ */
+export interface ChunkState {
+  blockIndex: number
+  /** Accumulated delta text per open block index. */
+  texts: Map<number, string>
+  /** Accumulated tool-call identity and raw arguments per open block index. */
+  toolCalls: Map<number, { id: string, name?: string, arguments: string }>
+  /** Open textual block type per block index (cleared by the matching end event). */
+  openTextual: Map<number, 'text' | 'reasoning'>
+  /** Whether a `usage` chunk was already emitted (`finish-step` precedes `finish`). */
+  usageSeen: boolean
+}
+
+/** Fresh translation state for one gateway stream. */
+export function chunkState(): ChunkState {
+  return { blockIndex: 0, texts: new Map(), toolCalls: new Map(), openTextual: new Map(), usageSeen: false }
+}
+
+function closeTextual(state: ChunkState, index: number, type: 'text' | 'reasoning'): StreamChunk[] {
+  state.openTextual.delete(index)
+  return [{ type: 'block-end', index, block: { type, text: state.texts.get(index) ?? '' } }]
+}
+
+/**
+ * Close the most recently opened block of one textual type. The gateway's
+ * `reasoning-end` / `text-end` events carry no block id, and `reasoning-end`
+ * arrives after `text-start` (the reasoning stream closes once the text
+ * stream opens), so the current block index is the wrong block to close.
+ */
+function closeLatest(state: ChunkState, type: 'text' | 'reasoning'): StreamChunk[] {
+  let latest: number | undefined
+  for (const [index, open] of state.openTextual) {
+    if (open === type && (latest === undefined || index > latest)) latest = index
+  }
+  return latest === undefined ? [] : closeTextual(state, latest, type)
+}
+
+/**
  * Translate one gateway stream event into one or more harness StreamChunks.
  * @returns an empty array when the event has no harness representation.
  */
 export function eventToChunks(
   event: CcStreamEvent,
-  state: { blockIndex: number },
+  state: ChunkState,
 ): StreamChunk[] {
   const chunks: StreamChunk[] = []
   switch (event.type) {
     case 'text-start': {
+      state.openTextual.set(state.blockIndex, 'text')
       chunks.push({ type: 'block-start', index: state.blockIndex, blockType: 'text' })
+      break
+    }
+    case 'text-end': {
+      chunks.push(...closeLatest(state, 'text'))
       break
     }
     case 'text-delta': {
       const text = typeof event.text === 'string' ? event.text : ''
       if (text.length > 0) {
+        state.texts.set(state.blockIndex, (state.texts.get(state.blockIndex) ?? '') + text)
         chunks.push({ type: 'text-delta', index: state.blockIndex, text })
       }
       break
     }
     case 'reasoning-start': {
+      state.openTextual.set(state.blockIndex, 'reasoning')
       chunks.push({ type: 'block-start', index: state.blockIndex, blockType: 'reasoning' })
+      break
+    }
+    case 'reasoning-end': {
+      chunks.push(...closeLatest(state, 'reasoning'))
       break
     }
     case 'reasoning-delta': {
       const text = typeof event.text === 'string' ? event.text : ''
       if (text.length > 0) {
+        state.texts.set(state.blockIndex, (state.texts.get(state.blockIndex) ?? '') + text)
         chunks.push({ type: 'reasoning-delta', index: state.blockIndex, text })
       }
       break
@@ -360,47 +453,87 @@ export function eventToChunks(
       const callId = typeof event.toolCallId === 'string' ? event.toolCallId
         : typeof event.id === 'string' ? event.id
           : ''
+      const name = typeof event.toolName === 'string' ? event.toolName : undefined
+      const argumentsDelta = JSON.stringify(input ?? {})
+      chunks.push({ type: 'block-start', index: state.blockIndex, blockType: 'tool-call' })
+      const known = state.toolCalls.get(state.blockIndex)
+      const id = callId || known?.id || ''
+      state.toolCalls.set(state.blockIndex, {
+        id,
+        name: name ?? known?.name,
+        arguments: (known?.arguments ?? '') + argumentsDelta,
+      })
       chunks.push({
         type: 'tool-call-delta',
         index: state.blockIndex,
-        id: CallId(callId),
-        ...typeof event.toolName === 'string' ? { name: event.toolName } : {},
-        argumentsDelta: JSON.stringify(input ?? {}),
+        id: ToolCallId(id),
+        ...name === undefined ? {} : { name },
+        argumentsDelta,
       })
+      // The gateway emits each tool call as one complete event, so the block
+      // opens and closes here; the invariant forbids finishing with it open.
+      chunks.push({
+        type: 'block-end',
+        index: state.blockIndex,
+        block: { type: 'tool-call', id: ToolCallId(id), name: name ?? known?.name ?? '', arguments: state.toolCalls.get(state.blockIndex)?.arguments ?? argumentsDelta },
+      })
+      state.toolCalls.delete(state.blockIndex)
       break
     }
-    // The gateway ends a step with `finish-step`; the CLI's own reader also
-    // accepts a bare `finish` carrying `totalUsage`, so both terminate here.
-    case 'finish-step':
-    case 'finish': {
-      const raw = event.usage ?? event.totalUsage
-      const usage = isRecord(raw) ? raw as unknown as CcUsage : undefined
-      if (usage) {
-        const inputDetails = isRecord(usage.inputTokenDetails) ? usage.inputTokenDetails : undefined
-        const outputDetails = isRecord(usage.outputTokenDetails) ? usage.outputTokenDetails : undefined
-        const cacheRead = inputDetails?.cacheReadTokens
-        const totalInput = usage.inputTokens
-        const noCache = inputDetails?.noCacheTokens
-        const inputTokens = noCache ?? (totalInput !== undefined && cacheRead !== undefined
-          ? Math.max(0, totalInput - cacheRead)
-          : totalInput) ?? 0
-        const outputTokens = usage.outputTokens ?? outputDetails?.textTokens ?? 0
-        chunks.push({
-          type: 'usage',
-          usage: {
-            inputTokens,
-            outputTokens,
-            ...cacheRead !== undefined ? { cacheReadTokens: cacheRead } : {},
-            ...outputDetails?.reasoningTokens !== undefined ? { reasoningTokens: outputDetails.reasoningTokens } : {},
-          },
-        })
+    // The gateway ends a step with `finish-step` carrying the step usage and
+    // closes the turn with a bare `finish` carrying `totalUsage`, like the
+    // CLI's own reader: only `finish` terminates, and usage is emitted once.
+    case 'finish-step': {
+      if (!state.usageSeen) {
+        const usage = finishUsage(event.usage ?? event.totalUsage)
+        if (usage !== undefined) {
+          state.usageSeen = true
+          chunks.push({ type: 'usage', usage })
+        }
       }
+      break
+    }
+    case 'finish': {
+      if (!state.usageSeen) {
+        const usage = finishUsage(event.usage ?? event.totalUsage)
+        if (usage !== undefined) {
+          state.usageSeen = true
+          chunks.push({ type: 'usage', usage })
+        }
+      }
+      // Close any block the gateway left open (a truncated stream may skip
+      // `reasoning-end` / `text-end`); the invariant forbids finishing open.
+      for (const [index, type] of state.openTextual) {
+        chunks.push(...closeTextual(state, index, type))
+      }
+      state.toolCalls.clear()
       const reason = event.finishReason ?? event.rawFinishReason ?? 'stop'
       chunks.push({ type: 'finish', reason: mapFinishReason(reason) })
       break
     }
   }
   return chunks
+}
+
+/** The harness usage of a gateway step/finish usage payload, if recognizable. */
+function finishUsage(raw: unknown): { inputTokens: number, outputTokens: number, cacheReadTokens?: number, reasoningTokens?: number } | undefined {
+  const usage = isRecord(raw) ? raw as unknown as CcUsage : undefined
+  if (!usage) return undefined
+  const inputDetails = isRecord(usage.inputTokenDetails) ? usage.inputTokenDetails : undefined
+  const outputDetails = isRecord(usage.outputTokenDetails) ? usage.outputTokenDetails : undefined
+  const cacheRead = inputDetails?.cacheReadTokens
+  const totalInput = usage.inputTokens
+  const noCache = inputDetails?.noCacheTokens
+  const inputTokens = noCache ?? (totalInput !== undefined && cacheRead !== undefined
+    ? Math.max(0, totalInput - cacheRead)
+    : totalInput) ?? 0
+  const outputTokens = usage.outputTokens ?? outputDetails?.textTokens ?? 0
+  return {
+    inputTokens,
+    outputTokens,
+    ...cacheRead !== undefined ? { cacheReadTokens: cacheRead } : {},
+    ...outputDetails?.reasoningTokens !== undefined ? { reasoningTokens: outputDetails.reasoningTokens } : {},
+  }
 }
 
 /** Map the gateway finish-reason vocabulary to the harness FinishReason. */

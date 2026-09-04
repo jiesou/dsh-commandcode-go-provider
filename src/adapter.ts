@@ -40,6 +40,7 @@ import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import {
   buildRequest,
   CC_VERSION,
+  chunkState,
   collectRequestImages,
   DEFAULT_MAX_TOKENS,
   eventToChunks,
@@ -314,7 +315,7 @@ export class CommandCodeGoAdapter extends LlmAdapter {
       throw new LlmError('returned no response body', 'EMPTY_RESPONSE')
     }
 
-    const state = { blockIndex: 0 }
+    const state = chunkState()
     for await (const event of parseEventStream(response.body)) {
       // A mid-stream failure arrives as an event, not an HTTP status; its
       // message is the only account of what went wrong.
@@ -332,7 +333,10 @@ export class CommandCodeGoAdapter extends LlmAdapter {
         state.blockIndex += 1
       }
       yield* eventToChunks(event, state)
-      if (event.type === 'finish-step' || event.type === 'finish') return
+      // Only `finish` terminates: the gateway always precedes it with a
+      // `finish-step` carrying the step usage, and the CLI's own reader also
+      // waits for the bare `finish` carrying `totalUsage`.
+      if (event.type === 'finish') return
     }
     // Gateway closed without a finish event: treat as truncated.
     throw new LlmError('stream ended without a finish event', 'STREAM_CLOSED')

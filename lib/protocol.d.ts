@@ -132,12 +132,36 @@ export declare function collectRequestImages(messages: readonly Message[]): Imag
 /** Build the gateway request envelope for one harness call. */
 export declare function buildRequest(options: GenerateOptions, images?: RequestImages): CcRequestEnvelope;
 /**
+ * Mutable per-stream translation state, owned by the adapter and threaded
+ * through every {@link eventToChunks} call in arrival order.
+ *
+ * The harness invariant requires every delta to address an open block of its
+ * own type and the stream to finish with no open block, while the gateway's
+ * `reasoning-end` / `text-end` events carry no content — so delta text is
+ * accumulated here to assemble the closing `block-end`.
+ */
+export interface ChunkState {
+    blockIndex: number;
+    /** Accumulated delta text per open block index. */
+    texts: Map<number, string>;
+    /** Accumulated tool-call identity and raw arguments per open block index. */
+    toolCalls: Map<number, {
+        id: string;
+        name?: string;
+        arguments: string;
+    }>;
+    /** Open textual block type per block index (cleared by the matching end event). */
+    openTextual: Map<number, 'text' | 'reasoning'>;
+    /** Whether a `usage` chunk was already emitted (`finish-step` precedes `finish`). */
+    usageSeen: boolean;
+}
+/** Fresh translation state for one gateway stream. */
+export declare function chunkState(): ChunkState;
+/**
  * Translate one gateway stream event into one or more harness StreamChunks.
  * @returns an empty array when the event has no harness representation.
  */
-export declare function eventToChunks(event: CcStreamEvent, state: {
-    blockIndex: number;
-}): StreamChunk[];
+export declare function eventToChunks(event: CcStreamEvent, state: ChunkState): StreamChunk[];
 /**
  * Parse a line-delimited JSON byte stream from `/alpha/generate` into events.
  * Lines are bare JSON objects (the gateway sends no `data:` SSE prefix).

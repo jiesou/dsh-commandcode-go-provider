@@ -30,6 +30,8 @@ export { CommandCodeGoAdapter, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, DEFAU
 export type { CommandCodeGoAdapterOptions, CommandCodeGoConnectionOptions, CommandCodeGoModel } from './adapter.js';
 export { fetchCatalog, fetchGoModels, imageCapable, isGoPlan, parseCatalog } from './models.js';
 export type { CatalogEntry, GoModel } from './models.js';
+export { chunkState } from './protocol.js';
+export type { ChunkState } from './protocol.js';
 export declare const name = "commandcode-go-provider";
 export declare const inject: string[];
 /**
