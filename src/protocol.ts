@@ -165,6 +165,18 @@ function toolResultOutput(
     : { type: 'text', value: value || '(no output)' }
 }
 
+/**
+ * Sanitize a tool call id for the gateway wire protocol.
+ *
+ * Handles composite ids encoded by other providers (e.g. OpenAI Responses
+ * `call_xxx|fc_xxx`) by taking the call id head, and caps length to 64 to
+ * satisfy downstream model validators.
+ */
+function sanitizeToolCallId(id: string): string {
+  const head = id.includes('|') ? id.split('|')[0]! : id
+  return head.length > 64 ? head.slice(0, 64) : head
+}
+
 function serializeAssistant(message: Message): Extract<CcMessage, { role: 'assistant' }> {
   const parts: Extract<CcMessage, { role: 'assistant' }>['content'] = []
   for (const block of message.content) {
@@ -177,7 +189,7 @@ function serializeAssistant(message: Message): Extract<CcMessage, { role: 'assis
     } else if (block.type === 'tool-call') {
       parts.push({
         type: 'tool-call',
-        toolCallId: block.id,
+        toolCallId: sanitizeToolCallId(block.id),
         toolName: block.name,
         input: safeParseJson(block.arguments),
       })
@@ -227,7 +239,7 @@ function serializeUser(message: Message, images: RequestImages | undefined): CcM
       role: 'tool',
       content: toolResults.map(result => ({
         type: 'tool-result' as const,
-        toolCallId: result.toolCallId,
+        toolCallId: sanitizeToolCallId(result.toolCallId),
         toolName: 'unknown',
         output: toolResultOutput(result),
       })),
