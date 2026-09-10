@@ -8,8 +8,8 @@
  * `id` / `name` / `context_length`: neither plan membership nor reasoning
  * support is part of the Provider API. Both come from the model catalog the
  * official `command-code` CLI ships (`dist/bundled/command-code-knowledge/
- * reference/models.md`), fetched live from jsDelivr so it tracks the `latest`
- * release instead of a checked-in snapshot.
+ * reference/models.md`), fetched live from the published npm package so it
+ * tracks the `latest` release instead of a checked-in snapshot.
  *
  * Go membership is therefore read, not guessed: the catalog's `Min plan`
  * column names the lowest plan each model belongs to (`Go and above`, `Pro
@@ -142,8 +142,16 @@ export function parseCatalog(markdown: string): Map<string, CatalogEntry> {
 }
 
 const DEFAULT_MODELS_URL = 'https://api.commandcode.ai/provider/v1/models'
-/** Official CLI catalog served from npm; `@latest` tracks new releases. */
-const CATALOG_URL = 'https://cdn.jsdelivr.net/npm/command-code@latest/dist/bundled/command-code-knowledge/reference/models.md'
+/**
+ * Official CLI catalog served from npm; `@latest` tracks new releases.
+ *
+ * unpkg, not jsDelivr: both serve the same file, but jsDelivr pins its
+ * `@latest` resolution for hours (measured: still resolving to 1.52.0 while
+ * 1.53.0 was out, whose catalog row for `deepseek/deepseek-v4.1-flash` was
+ * missing — so the Go filter silently dropped it). unpkg re-resolves the
+ * `@latest` redirect within a minute.
+ */
+const CATALOG_URL = 'https://unpkg.com/command-code@latest/dist/bundled/command-code-knowledge/reference/models.md'
 /** Per-request fetch budget for the upstream catalog endpoints. */
 const FETCH_TIMEOUT_MS = 30_000
 

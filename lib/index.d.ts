@@ -11,7 +11,7 @@
  *    Grok 4.5, Muse Spark 1.2 Contributor), re-scanning on an interval. The
  *    Provider API discloses no reasoning metadata, so per-model effort support
  *    is merged from the official `command-code` CLI catalog
- *    (`reference/models.md`, fetched live from jsDelivr).
+ *    (`reference/models.md`, fetched live from the published npm package).
  * 2. Registers one configurable provider route per configured account (the
  *    `accounts` dictionary; a single default account when it is absent) whose
  *    adapter streams over `/alpha/generate`, so the harness model picker,

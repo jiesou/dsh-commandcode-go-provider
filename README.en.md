@@ -95,11 +95,25 @@ The model catalog is scanned once and shared by every account; settings changes 
 
 Reasoning effort needs no configuration: levels come from the official CLI catalog, and a model exposes exactly the levels it accepts (`low`/`medium`/`high`/`xhigh`/`max`), plus an explicit `Off` entry. **Default** means "do not send `reasoning_effort`" — the gateway decides the depth. **Off** is the same wire shape as Default but pins the intent explicitly. A model the catalog leaves blank shows no level selector at all.
 
+## Compatibility
+
+Declared in `package.json` under `dsh.compatibility`: DSH `>=0.1.2-alpha.3 <0.2.0`, Node.js `^22.19.0 || >=24.0.0`, profiles `web` / `headless`.
+
+Per-release evidence (each release installed into a disposable profile with `dsh plugin add <tarball>`, cold-started until it issued a real request, then uninstalled):
+
+| DSH version | install | start | uninstall |
+| --- | --- | --- | --- |
+| 0.1.5-alpha.1 | passed | passed | passed |
+| 0.1.5-alpha.2 | passed | passed | passed |
+| 0.1.5-rc.1 | passed | passed | passed |
+
+Reproduce with `DSH_HOME=<empty dir> dsh --profile compat --from-default-profile headless`, add that release's `@deepseek-ai/dsh-base` and the plugin tarball, check the plugin row in `dsh --profile compat --dump-config`, cold-start a real gateway request to exercise the provider and its model catalog, then `dsh plugin --profile compat remove` and confirm the profile still boots.
+
 ## Credit
 
 Port of [brent-weatherall/opencode-commandcode-provider](https://github.com/brent-weatherall/opencode-commandcode-provider) to DSH.
 
-This plugin adds dynamic reasoning effort extraction, parsed from <https://cdn.jsdelivr.net/npm/command-code@latest/dist/bundled/command-code-knowledge/reference/models.md>.
+This plugin adds dynamic reasoning effort extraction, parsed from <https://unpkg.com/command-code@latest/dist/bundled/command-code-knowledge/reference/models.md>.
 
 ## License
 

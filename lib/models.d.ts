@@ -8,8 +8,8 @@
  * `id` / `name` / `context_length`: neither plan membership nor reasoning
  * support is part of the Provider API. Both come from the model catalog the
  * official `command-code` CLI ships (`dist/bundled/command-code-knowledge/
- * reference/models.md`), fetched live from jsDelivr so it tracks the `latest`
- * release instead of a checked-in snapshot.
+ * reference/models.md`), fetched live from the published npm package so it
+ * tracks the `latest` release instead of a checked-in snapshot.
  *
  * Go membership is therefore read, not guessed: the catalog's `Min plan`
  * column names the lowest plan each model belongs to (`Go and above`, `Pro

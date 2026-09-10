@@ -93,11 +93,25 @@ echo 'COMMANDCODE_API_KEY: [your key, be like user_xxxx]' >> ~/.dsh/.credentials
 
 Reasoning effort 不需要配置：档位来自官方 CLI catalog，模型只暴露它真正接受的档位（`low`/`medium`/`high`/`xhigh`/`max`），加一个显式 `Off` 入口。**Default** 表示"不发送 `reasoning_effort`"字段，由上游自行决定深度。**Off** 与 Default 的 wire 形态一致，但显式声明"不推理"的意图。catalog 里档位为空的模型干脆不显示档位选择器。
 
+## 兼容性
+
+声明在 `package.json` 的 `dsh.compatibility`：DSH `>=0.1.2-alpha.3 <0.2.0`，Node.js `^22.19.0 || >=24.0.0`，Profile `web` / `headless`。
+
+逐版本证据（每个版本都用 `dsh plugin add <tarball>` 装进一次性 Profile，冷启动到发出真实请求，再卸载）：
+
+| DSH 版本 | 安装 | 启动 | 卸载 |
+| --- | --- | --- | --- |
+| 0.1.5-alpha.1 | 通过 | 通过 | 通过 |
+| 0.1.5-alpha.2 | 通过 | 通过 | 通过 |
+| 0.1.5-rc.1 | 通过 | 通过 | 通过 |
+
+复现方式：`DSH_HOME=<空目录> dsh --profile compat --from-default-profile headless`，装入对应版本的 `@deepseek-ai/dsh-base` / 依赖与插件 tarball，`dsh --profile compat --dump-config` 检查插件行，冷启动用真实网关请求校验 provider 与模型目录，最后 `dsh plugin --profile compat remove` 复查卸载后仍能启动。
+
 ## Credit
 
 移植自 [brent-weatherall/opencode-commandcode-provider](https://github.com/brent-weatherall/opencode-commandcode-provider) 到 DSH。
 
-本 plugin 加入了动态 reasoning effort 提取功能，从 <https://cdn.jsdelivr.net/npm/command-code@latest/dist/bundled/command-code-knowledge/reference/models.md> 解析。
+本 plugin 加入了动态 reasoning effort 提取功能，从 <https://unpkg.com/command-code@latest/dist/bundled/command-code-knowledge/reference/models.md> 解析。
 
 ## License
 
