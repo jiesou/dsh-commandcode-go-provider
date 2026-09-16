@@ -35,7 +35,8 @@ import type {
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
-import type { AttachmentStore, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
+import { requestImageDimensions } from '@deepseek-ai/dsh-attachment'
+import type { AttachmentStore, ImageAttachmentRef, ImageRequestTarget, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import {
   buildRequest,
@@ -112,6 +113,20 @@ const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
  */
 const REQUEST_IMAGE_POLICY = { maxPixels: 4_194_304, maxBytes: 1_048_576 }
 
+/**
+ * Deterministic request target for one source image under the route budgets.
+ * Both spellings of the same budget ride along: dsh >= 0.1.6 reads
+ * `width`/`height`, earlier releases read `maxPixels`, and each validates only
+ * the fields it knows, so one target serves either runtime.
+ */
+function requestImageTarget(ref: ImageAttachmentRef): ImageRequestTarget & { maxPixels: number } {
+  return {
+    ...requestImageDimensions(ref.width, ref.height, REQUEST_IMAGE_POLICY.maxPixels),
+    maxPixels: REQUEST_IMAGE_POLICY.maxPixels,
+    maxBytes: REQUEST_IMAGE_POLICY.maxBytes,
+  }
+}
+
 function effortInfo(effort: string): { id: ReturnType<typeof ReasoningEffortId>, name: string } {
   return { id: ReasoningEffortId(effort), name: GATEWAY_EFFORTS[effort] ?? effort }
 }
@@ -177,7 +192,7 @@ export class CommandCodeGoAdapter extends LlmAdapter {
     if (attachments === undefined) {
       throw new LlmError('image input requires the durable attachment service', 'UNSUPPORTED_CONTENT')
     }
-    const versions = await Promise.all(refs.map(ref => attachments.readImageRequest(ref, REQUEST_IMAGE_POLICY, signal)))
+    const versions = await Promise.all(refs.map(ref => attachments.readImageRequest(ref, requestImageTarget(ref), signal)))
     return new Map(versions.map(version => [version.attachment.attachmentId, version]))
   }
 
