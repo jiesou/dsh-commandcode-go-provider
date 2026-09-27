@@ -22,9 +22,12 @@ import type {
   ContentBlock,
   FinishReason,
   GenerateOptions,
-  Message,
+  RequestMessage,
+  RequestUserInput,
   StreamChunk,
+  ToolResultMessage,
   ToolSchema,
+  UserMessage,
 } from '@deepseek-ai/dsh-llm'
 import type { ImageAttachmentRef, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { platform, arch } from 'node:os'
@@ -136,7 +139,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** The flattened text of a message's content blocks. */
-function flattenText(blocks: ContentBlock[]): string {
+function flattenText(blocks: readonly ContentBlock[]): string {
   return blocks
     .filter(block => block.type === 'text')
     .map(block => block.text)
@@ -151,16 +154,14 @@ function imageRefs(blocks: readonly ContentBlock[]): ImageAttachmentRef[] {
 }
 
 /**
- * The text value of one tool result. Images nested in it are deliberately not
- * carried here: the gateway's tool output is text-only, so they ride the user
- * turn {@link serializeUser} appends after it. A text-only route never sees
- * them at all — the harness projects nested images to placeholder text first.
+ * The text value of one tool result. Images the tool returned are deliberately
+ * not carried here: the gateway's tool output is text-only, so they ride the
+ * user turn {@link serializeTool} appends after it. A text-only route never
+ * sees them at all — the harness projects them to placeholder text first.
  */
-function toolResultOutput(
-  result: Extract<ContentBlock, { type: 'tool-result' }>,
-): CcToolResultContent['output'] {
+function toolResultOutput(result: ToolResultMessage): CcToolResultContent['output'] {
   const value = flattenText(result.content)
-  return result.isError
+  return result.isError === true
     ? { type: 'error-text', value: value || 'Execution denied' }
     : { type: 'text', value: value || '(no output)' }
 }
@@ -177,7 +178,7 @@ function sanitizeToolCallId(id: string): string {
   return head.length > 64 ? head.slice(0, 64) : head
 }
 
-function serializeAssistant(message: Message): Extract<CcMessage, { role: 'assistant' }> {
+function serializeAssistant(message: Extract<RequestMessage, { role: 'assistant' }>): Extract<CcMessage, { role: 'assistant' }> {
   const parts: Extract<CcMessage, { role: 'assistant' }>['content'] = []
   for (const block of message.content) {
     if (block.type === 'text') {
@@ -220,68 +221,65 @@ function imagePart(ref: ImageAttachmentRef, images: RequestImages | undefined): 
 }
 
 /**
- * One harness user message as gateway turns. Like the CLI's own
- * `toWireMessages`, tool results ALWAYS serialize to their own `tool` turn,
- * even when text/images share the message (a read_image result next to
- * steering text, parallel results folded into one turn): dropping one leaves
- * its assistant tool-call unmatched and the gateway answers "Tool result is
- * missing for tool call …". Images a tool returned cannot ride the gateway's
- * text-only tool output, so they follow the results as a plain user turn —
- * the only role the gateway carries inline images in.
+ * One harness user message as gateway turns: its text and image parts, in block
+ * order, like the CLI's own user serialization. A text-only message keeps the
+ * flat string shape.
  */
-function serializeUser(message: Message, images: RequestImages | undefined): CcMessage[] {
-  const wire: CcMessage[] = []
-  const toolResults = message.content.filter(
-    (block): block is Extract<ContentBlock, { type: 'tool-result' }> => block.type === 'tool-result',
-  )
-  if (toolResults.length > 0) {
-    wire.push({
-      role: 'tool',
-      content: toolResults.map(result => ({
-        type: 'tool-result' as const,
-        toolCallId: sanitizeToolCallId(result.toolCallId),
-        toolName: 'unknown',
-        output: toolResultOutput(result),
-      })),
-    })
-  }
-  // Text and image parts keep their block order, like the CLI's own user
-  // serialization; a text-only message keeps the flat string shape.
+function serializeUser(message: UserMessage | RequestUserInput, images: RequestImages | undefined): CcMessage[] {
   const parts: CcUserPart[] = []
   for (const block of message.content) {
     if (block.type === 'text') parts.push({ type: 'text', text: block.text })
     else if (block.type === 'image') parts.push(imagePart(block.attachment, images))
   }
-  for (const result of toolResults) {
-    for (const ref of imageRefs(result.content)) parts.push(imagePart(ref, images))
-  }
-  if (parts.length > 0) {
-    wire.push(parts.every(part => part.type === 'text')
-      ? { role: 'user', content: parts.map(part => (part as { text: string }).text).join('') }
-      : { role: 'user', content: parts })
+  if (parts.length === 0) return []
+  return [parts.every(part => part.type === 'text')
+    ? { role: 'user', content: parts.map(part => (part as { text: string }).text).join('') }
+    : { role: 'user', content: parts }]
+}
+
+/**
+ * One harness tool-result message as gateway turns: its own `tool` turn, plus
+ * the user turn carrying any images the tool returned.
+ *
+ * A tool result is a first-class `role: 'tool'` message whose call id lives on
+ * the message, so one message is exactly one result. The `tool` turn ALWAYS
+ * comes first: dropping or reordering it leaves its assistant tool-call
+ * unmatched and the gateway answers "Tool result is missing for tool call …".
+ * Images cannot ride the gateway's text-only tool output, so they follow as a
+ * plain user turn — the only role the gateway carries inline images in — and
+ * {@link buildRequest} holds that turn past the end of the tool run.
+ */
+function serializeTool(message: ToolResultMessage, images: RequestImages | undefined): CcMessage[] {
+  const wire: CcMessage[] = [{
+    role: 'tool',
+    content: [{
+      type: 'tool-result',
+      toolCallId: sanitizeToolCallId(message.toolCallId),
+      toolName: 'unknown',
+      output: toolResultOutput(message),
+    }],
+  }]
+  const refs = imageRefs(message.content)
+  if (refs.length > 0) {
+    wire.push({ role: 'user', content: refs.map(ref => imagePart(ref, images)) })
   }
   return wire
 }
 
 /**
  * The ordered, de-duplicated image refs a request needs bytes for, rejecting
- * images in roles the gateway cannot carry (assistant history).
+ * images in roles the gateway cannot carry (assistant and developer history).
  */
-export function collectRequestImages(messages: readonly Message[]): ImageAttachmentRef[] {
+export function collectRequestImages(messages: readonly RequestMessage[]): ImageAttachmentRef[] {
   const refs = new Map<string, ImageAttachmentRef>()
   for (const message of messages) {
-    if (message.role !== 'user' && contentHasImage(message.content)) {
+    if (message.role !== 'user' && message.role !== 'tool' && contentHasImage(message.content)) {
       throw new LlmError(
         `a ${message.role} message carries an image the gateway cannot replay`,
         'UNSUPPORTED_CONTENT',
       )
     }
-    for (const ref of [
-      ...imageRefs(message.content),
-      ...message.content.flatMap(block => block.type === 'tool-result' ? imageRefs(block.content) : []),
-    ]) {
-      refs.set(ref.attachmentId, ref)
-    }
+    for (const ref of imageRefs(message.content)) refs.set(ref.attachmentId, ref)
   }
   return [...refs.values()]
 }
@@ -302,29 +300,46 @@ function isImageOnlyUserTurn(turn: CcMessage): boolean {
 export function buildRequest(options: GenerateOptions, images?: RequestImages): CcRequestEnvelope {
   let system = options.system ?? ''
   const messages: CcMessage[] = []
-  // Image-only user turns split from tool results (nested read_image bytes)
-  // must not land between tool turns: the gateway ends tool collection at
-  // the first user turn and rejects any later result with "Tool result is
-  // missing for tool call …". Hold them until the tool run ends instead.
+  // Image-only user turns split from tool results (read_image bytes) must not
+  // land between tool turns: the gateway ends tool collection at the first user
+  // turn and rejects any later result with "Tool result is missing for tool
+  // call …". A tool run spans assistant tool-calling turns, so hold these until
+  // the run is over — the next real user turn, or the end of the request.
   const deferred: CcMessage[] = []
   const flushDeferred = (): void => {
     if (deferred.length > 0) messages.push(...deferred.splice(0))
   }
   const pushTurn = (turn: CcMessage): void => {
-    if (isImageOnlyUserTurn(turn) && messages[messages.length - 1]?.role === 'tool') {
+    if (isImageOnlyUserTurn(turn)
+      && (messages[messages.length - 1]?.role === 'tool' || deferred.length > 0)) {
       deferred.push(turn)
       return
     }
-    if (turn.role !== 'tool') flushDeferred()
+    if (turn.role === 'user') flushDeferred()
     messages.push(turn)
   }
   for (const message of options.messages) {
-    if (message.role === 'system') {
-      system += (system ? '\n\n' : '') + flattenText(message.content)
-      continue
+    switch (message.role) {
+      case 'system':
+        system += (system ? '\n\n' : '') + flattenText(message.content)
+        break
+      case 'developer':
+        // The gateway has one static tool list per request and no tool-update
+        // channel, so a mid-conversation declaration change cannot be honoured.
+        // Refusing loud beats silently serving a stale tool list.
+        throw new LlmError(
+          'the gateway cannot represent a developer tool-change message',
+          'UNSUPPORTED_CONTENT',
+        )
+      case 'assistant':
+        pushTurn(serializeAssistant(message))
+        break
+      case 'tool':
+        for (const turn of serializeTool(message, images)) pushTurn(turn)
+        break
+      default:
+        for (const turn of serializeUser(message, images)) pushTurn(turn)
     }
-    if (message.role === 'assistant') pushTurn(serializeAssistant(message))
-    else for (const turn of serializeUser(message, images)) pushTurn(turn)
   }
   flushDeferred()
 

@@ -31,6 +31,7 @@ import type {
   LlmModelReasoningInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
+  RequestMessage,
   ResolvedRetryPolicy,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
@@ -183,7 +184,7 @@ export class CommandCodeGoAdapter extends LlmAdapter {
    * text-only traffic and fails loud only when an image actually arrives.
    */
   private async prepareRequestImages(
-    messages: GenerateOptions['messages'],
+    messages: RequestMessage[],
     signal: AbortSignal | undefined,
   ): Promise<RequestImages | undefined> {
     const refs = collectRequestImages(messages)

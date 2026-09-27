@@ -30,7 +30,8 @@ import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
-import type {} from '@deepseek-ai/dsh-settings'
+// Augments Context with `fiber.entry` and the `loader/volatile-update` event.
+import type {} from '@deepseek-ai/cordis-plugin-loader'
 import { CommandCodeGoAdapter, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, DEFAULT_STREAM_IDLE_TIMEOUT_MS } from './adapter.js'
 import type { CommandCodeGoConnectionOptions, CommandCodeGoModel } from './adapter.js'
 import { fetchCatalog, fetchGoModels } from './models.js'
@@ -105,14 +106,37 @@ export const AccountProfile: z<AccountProfile> = z.object({
   retryPolicy: RetryPolicySchema,
 })
 
-export const Config: z<Config> = z.object({
-  accounts: z.dict(AccountProfile).default({}),
-  apiKeyEnv: z.string().role('credential-ref').default(DEFAULT_API_KEY_ENV),
-  baseURL: z.string().default(DEFAULT_BASE_URL),
-  maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(DEFAULT_MAX_TOKENS),
-  defaultContextWindow: z.number().step(1).min(1).default(DEFAULT_CONTEXT_WINDOW),
-  retryPolicy: RetryPolicySchema,
+export const Config = z.object({
+  accounts: z.dict(AccountProfile).default({}).volatile(),
+  apiKeyEnv: z.string().role('credential-ref').default(DEFAULT_API_KEY_ENV).volatile(),
+  baseURL: z.string().default(DEFAULT_BASE_URL).volatile(),
+  maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(DEFAULT_MAX_TOKENS).volatile(),
+  defaultContextWindow: z.number().step(1).min(1).default(DEFAULT_CONTEXT_WINDOW).volatile(),
+  retryPolicy: RetryPolicySchema.volatile(),
 })
+
+/**
+ * {@link Config} as the Loader holds it: every field is volatile, so a settings write
+ * reaches the running plugin as a committed reference instead of remounting it, and
+ * the field is one the settings service shows a form for.
+ */
+type LiveConfig = Schemastery.TypeT<typeof Config>
+
+/**
+ * The committed configuration as plain mutable values, which is the {@link Config}
+ * shape {@link resolveAccounts} and {@link multiAccount} consume. Unwrapping the
+ * references yields immutable snapshots; cloning is what makes them workable again.
+ */
+function liveConfig(config: LiveConfig): Config {
+  return structuredClone({
+    accounts: config.accounts.get(),
+    apiKeyEnv: config.apiKeyEnv.get(),
+    baseURL: config.baseURL.get(),
+    maxTokens: config.maxTokens.get(),
+    defaultContextWindow: config.defaultContextWindow.get(),
+    retryPolicy: config.retryPolicy.get(),
+  }) as Config
+}
 
 /** Resolved connection facts per provider route, keyed by route id. */
 export type ResolvedAccounts = Map<string, CommandCodeGoConnectionOptions>
@@ -147,20 +171,29 @@ export function resolveAccounts(config: Config, scanned: readonly CommandCodeGoM
   }]))
 }
 
-export function apply(ctx: Context, config: Config): void {
+export function apply(ctx: Context, config: LiveConfig): void {
   // The live-scanned catalog lives OUTSIDE the settings-backed config so a
   // scan cannot be clobbered by a settings snapshot; every account reads the
   // merged view through this thunk.
   let scanned: CommandCodeGoModel[] = []
-  let current: () => Config = () => config
-  let cache: { raw: Config; scanned: readonly CommandCodeGoModel[]; accounts: ResolvedAccounts } | undefined
+  // The Loader owns this namespace, so the configuration form is addressed by
+  // the profile entry id that mounted this plugin.
+  const settingsNs = ctx.fiber.entry?.options.id ?? DEFAULT_SETTINGS_NS
+  let lastRaw: Config | undefined
+  let lastScanned: readonly CommandCodeGoModel[] | undefined
+  let memoized: ResolvedAccounts | undefined
   const accounts = (): ResolvedAccounts => {
-    const raw = current()
-    if (cache !== undefined && cache.raw === raw && cache.scanned === scanned) {
-      return cache.accounts
+    const raw = liveConfig(config)
+    // The resolved snapshot must stay identical across operations that observe
+    // no change, so it is memoized on the committed configuration plus the scan.
+    if (memoized !== undefined && lastScanned === scanned && lastRaw !== undefined
+      && deepEqualJson(raw, lastRaw)) {
+      return memoized
     }
     const next = resolveAccounts(raw, scanned)
-    cache = { raw, scanned, accounts: next }
+    lastRaw = raw
+    lastScanned = scanned
+    memoized = next
     return next
   }
 
@@ -215,14 +248,17 @@ export function apply(ctx: Context, config: Config): void {
    * shape it has always had); declared accounts address their own
    * `accounts.<key>` scope, like the official pi-ai adapter.
    */
-  const directoryEntries = () => [...accounts().entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([provider, account]) => ({
-      provider,
-      displayName: account.displayName,
-      settingsNs: DEFAULT_SETTINGS_NS,
-      settingsPath: multiAccount(current()) ? ['accounts', provider] : [],
-    }))
+  const directoryEntries = () => {
+    const declared = multiAccount(liveConfig(config))
+    return [...accounts().entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([provider, account]) => ({
+        provider,
+        displayName: account.displayName,
+        settingsNs,
+        settingsPath: declared ? ['accounts', provider] : [],
+      }))
+  }
 
   /**
    * Registration facts: a change here must re-register the adapter routes.
@@ -256,24 +292,19 @@ export function apply(ctx: Context, config: Config): void {
   ensureDirectory()
   ensureRegistrationFacts()
 
-  ctx.inject(['settings'], (settingsCtx) => {
-    settingsCtx.settings.installSection(ctx, DEFAULT_SETTINGS_NS, Config, config, {
-      setSource: (source) => {
-        current = source
-      },
-      onChange: () => {
-        try {
-          ensureRegistrationFacts()
-        } catch (error: unknown) {
-          ctx.logger.error('[commandcode-go-provider] keeping the previously registered routes after a refused update: %s', errorChain(error))
-        }
-        try {
-          ensureDirectory()
-        } catch (error: unknown) {
-          ctx.logger.error('[commandcode-go-provider] keeping the previous configurable-provider directory after a refused update: %s', errorChain(error))
-        }
-      },
-    })
+  // Every field is volatile, so the Loader commits a settings write into this
+  // fiber and announces it here instead of remounting; re-derive the routes.
+  ctx.on('loader/volatile-update', () => {
+    try {
+      ensureRegistrationFacts()
+    } catch (error: unknown) {
+      ctx.logger.error('[commandcode-go-provider] keeping the previously registered routes after a refused update: %s', errorChain(error))
+    }
+    try {
+      ensureDirectory()
+    } catch (error: unknown) {
+      ctx.logger.error('[commandcode-go-provider] keeping the previous configurable-provider directory after a refused update: %s', errorChain(error))
+    }
   })
 
   /** Scan the Go catalog and swap it into the adapter's view. */

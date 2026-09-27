@@ -95,15 +95,17 @@ Reasoning effort 不需要配置：档位来自官方 CLI catalog，模型只暴
 
 ## 兼容性
 
-声明在 `package.json` 的 `dsh.compatibility`：DSH `>=0.1.2-alpha.3 <0.2.0`，Node.js `^22.19.0 || >=24.0.0`，Profile `web` / `headless`。
+声明在 `package.json` 的 `dsh.compatibility`：DSH `>=0.1.7-alpha.1 <0.2.0`，Node.js `^22.19.0 || >=24.0.0`，Profile `web` / `headless`。
+
+`>=0.1.7-alpha.1` 是硬下限，不是偏好：该版本起 dsh-llm 把工具结果改成独立的 `role: 'tool'` 消息（`toolCallId` 移到消息层），并重写了 dsh-settings 的表单模型（`installSection` 被 `SettingsForms` 取代、配置字段需标记 `volatile()` 才会出现在设置页）。本插件按新模型实现，0.1.6 及更早的 `role: 'user'` + `tool-result` block 形态不再支持。
 
 逐版本证据（每个版本都用 `dsh plugin add <tarball>` 装进一次性 Profile，冷启动到发出真实请求，再卸载）：
 
 | DSH 版本 | 安装 | 启动 | 卸载 |
 | --- | --- | --- | --- |
-| 0.1.5-alpha.1 | 通过 | 通过 | 通过 |
-| 0.1.5-alpha.2 | 通过 | 通过 | 通过 |
-| 0.1.5-rc.1 | 通过 | 通过 | 通过 |
+| 0.1.7-rc.2 | 通过 | 通过 | 通过 |
+
+0.1.7-alpha.1 / alpha.2 / rc.1 满足声明下限，但未逐版本实测。
 
 复现方式：`DSH_HOME=<空目录> dsh --profile compat --from-default-profile headless`，装入对应版本的 `@deepseek-ai/dsh-base` / 依赖与插件 tarball，`dsh --profile compat --dump-config` 检查插件行，冷启动用真实网关请求校验 provider 与模型目录，最后 `dsh plugin --profile compat remove` 复查卸载后仍能启动。
 

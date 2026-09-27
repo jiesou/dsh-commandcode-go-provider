@@ -16,7 +16,7 @@
  *
  * @module dsh-commandcode-go-provider/protocol
  */
-import type { GenerateOptions, Message, StreamChunk } from '@deepseek-ai/dsh-llm';
+import type { GenerateOptions, RequestMessage, StreamChunk } from '@deepseek-ai/dsh-llm';
 import type { ImageAttachmentRef, RequestImageAttachment } from '@deepseek-ai/dsh-attachment';
 /** Gateway version pinned to a known-good Command Code CLI release. */
 export declare const CC_VERSION = "0.26.20";
@@ -126,9 +126,9 @@ interface CcRequestEnvelope {
 }
 /**
  * The ordered, de-duplicated image refs a request needs bytes for, rejecting
- * images in roles the gateway cannot carry (assistant history).
+ * images in roles the gateway cannot carry (assistant and developer history).
  */
-export declare function collectRequestImages(messages: readonly Message[]): ImageAttachmentRef[];
+export declare function collectRequestImages(messages: readonly RequestMessage[]): ImageAttachmentRef[];
 /** Build the gateway request envelope for one harness call. */
 export declare function buildRequest(options: GenerateOptions, images?: RequestImages): CcRequestEnvelope;
 /**

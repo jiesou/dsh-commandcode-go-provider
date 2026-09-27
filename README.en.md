@@ -97,15 +97,17 @@ Reasoning effort needs no configuration: levels come from the official CLI catal
 
 ## Compatibility
 
-Declared in `package.json` under `dsh.compatibility`: DSH `>=0.1.2-alpha.3 <0.2.0`, Node.js `^22.19.0 || >=24.0.0`, profiles `web` / `headless`.
+Declared in `package.json` under `dsh.compatibility`: DSH `>=0.1.7-alpha.1 <0.2.0`, Node.js `^22.19.0 || >=24.0.0`, profiles `web` / `headless`.
+
+`>=0.1.7-alpha.1` is a hard floor, not a preference: that release made dsh-llm carry tool results as first-class `role: 'tool'` messages (`toolCallId` moved to the message) and rewrote the dsh-settings form model (`installSection` replaced by `SettingsForms`, and a config field only appears on the settings page once it is marked `volatile()`). This plugin implements the new model; the pre-0.1.7 `role: 'user'` + `tool-result` block shape is no longer supported.
 
 Per-release evidence (each release installed into a disposable profile with `dsh plugin add <tarball>`, cold-started until it issued a real request, then uninstalled):
 
 | DSH version | install | start | uninstall |
 | --- | --- | --- | --- |
-| 0.1.5-alpha.1 | passed | passed | passed |
-| 0.1.5-alpha.2 | passed | passed | passed |
-| 0.1.5-rc.1 | passed | passed | passed |
+| 0.1.7-rc.2 | passed | passed | passed |
+
+0.1.7-alpha.1 / alpha.2 / rc.1 meet the declared floor but were not each verified end to end.
 
 Reproduce with `DSH_HOME=<empty dir> dsh --profile compat --from-default-profile headless`, add that release's `@deepseek-ai/dsh-base` and the plugin tarball, check the plugin row in `dsh --profile compat --dump-config`, cold-start a real gateway request to exercise the provider and its model catalog, then `dsh plugin --profile compat remove` and confirm the profile still boots.
 
