@@ -23,7 +23,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "release": "npm run build && npm version patch && git push --follow-tags && npm publish"
+    "release": "npm run build && npm version patch && git push --follow-tags"
   },
   "keywords": [
     "dsh",

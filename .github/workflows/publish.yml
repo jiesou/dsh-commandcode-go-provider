@@ -28,7 +28,7 @@ jobs:
           npm run typecheck --if-present && npm run build --if-present
           if output="$(npm publish --provenance --access public 2>&1)"; then
             echo "published"
-          elif grep -Eq 'EPUBLISHCONFLICT|cannot publish over the previously published versions' <<<"$output"; then
+          elif grep -Eq 'EPUBLISHCONFLICT|previously published versions|previously staged version' <<<"$output"; then
             echo "skip: version already exists"
           else
             echo "publish failed:"
