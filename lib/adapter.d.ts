@@ -14,9 +14,9 @@
  * @module dsh-commandcode-go-provider/adapter
  */
 import { LlmAdapter } from '@deepseek-ai/dsh-llm';
-import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, ResolvedRetryPolicy, StreamChunk } from '@deepseek-ai/dsh-llm';
+import type { GenerateOptions, ImageAttachmentAccess, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, ResolvedRetryPolicy, StreamChunk } from '@deepseek-ai/dsh-llm';
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials';
-import type { AttachmentStore } from '@deepseek-ai/dsh-attachment';
+import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment';
 import { DEFAULT_MAX_TOKENS } from './protocol.js';
 /** One catalog model advertised by the adapter. */
 export interface CommandCodeGoModel {
@@ -45,6 +45,8 @@ export interface CommandCodeGoConnectionOptions {
     maxTokens: number;
     /** Positive context capacity used when the selected model has no exact value. */
     defaultContextWindow: number;
+    /** Inline base64 image bytes one request accepts before it must be offloaded. */
+    maxRequestImageBytes: number;
     /** Scanned Go catalog; requests remain unrestricted. */
     models: readonly CommandCodeGoModel[];
     /** Provider-owned model-request retry policy, already resolved. */
@@ -61,11 +63,23 @@ export interface CommandCodeGoAdapterOptions {
      * one keeps working for text-only traffic.
      */
     resolveAttachments?: () => AttachmentStore | undefined;
+    /**
+     * Map one durable image's stored host object into the current tool execution
+     * world, so an offloaded occurrence still names a path the model can read.
+     */
+    resolveImageAccess?: (attachments: AttachmentStore, ref: ImageAttachmentRef) => ImageAttachmentAccess | undefined;
 }
 /** Default maximum idle interval while an adapter stream read is outstanding. */
 export declare const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300000;
 /** Default combined request/response context capacity. */
 export declare const DEFAULT_CONTEXT_WINDOW = 1000000;
+/**
+ * Default inline image budget for one request, deliberately below the official
+ * pi-ai adapter's 20 MiB: the gateway stream is stateless, so every retained
+ * image rides every turn again, and a smaller budget keeps a long conversation
+ * from re-sending megabytes of images on each request.
+ */
+export declare const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 4194304;
 export { DEFAULT_MAX_TOKENS };
 /**
  * Command Code Go adapter. One instance serves every configured account; the
@@ -75,11 +89,22 @@ export declare class CommandCodeGoAdapter extends LlmAdapter {
     private readonly config;
     constructor(config: CommandCodeGoAdapterOptions);
     /**
-     * Resolve the request bytes for every image in the conversation. The
+     * Resolve the request bytes for every retained image in the conversation. The
      * attachment service is optional: a deployment without one keeps serving
      * text-only traffic and fails loud only when an image actually arrives.
+     *
+     * A request that exceeds the route's image budget fails with
+     * `IMAGE_OFFLOAD_REQUIRED` naming how many oldest occurrences must be
+     * offloaded; the harness logs that selection and retries, so no image is ever
+     * dropped without a durable decision.
      */
     private prepareRequestImages;
+    /**
+     * The one projection every request shares: an offloaded occurrence reaches
+     * the gateway as placeholder text instead of bytes, and only retained
+     * occurrences are resolved, encoded, and sent.
+     */
+    private requestMessages;
     providerInfo(provider: string): LlmProviderInfo;
     providerRetryPolicy(provider: string): ResolvedRetryPolicy;
     listModels(provider: string): Promise<readonly LlmModelInfo[]>;

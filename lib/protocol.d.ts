@@ -127,6 +127,8 @@ interface CcRequestEnvelope {
 /**
  * The ordered, de-duplicated image refs a request needs bytes for, rejecting
  * images in roles the gateway cannot carry (assistant and developer history).
+ * Occurrences the harness already offloaded need no bytes and are never
+ * returned, so a caller cannot resolve an image the route must not send.
  */
 export declare function collectRequestImages(messages: readonly RequestMessage[]): ImageAttachmentRef[];
 /** Build the gateway request envelope for one harness call. */

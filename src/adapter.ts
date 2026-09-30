@@ -18,15 +18,22 @@ import {
   attributionHeaders,
   CONTEXT_WINDOW_EXCEEDED_CODE,
   errorChain,
+  IMAGE_OFFLOAD_REQUIRED_CODE,
   isContextWindowExceededError,
   isQuotaExceededError,
   LlmAdapter,
   LlmError,
+  offloadedImageText,
+  projectOffloadedImages,
   QUOTA_EXCEEDED_CODE,
   ReasoningEffortId,
+  requiredImageOffload,
+  resolveImageAttachmentAccess,
 } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
+  ImageAttachmentAccess,
+  ImageBlock,
   LlmModelInfo,
   LlmModelReasoningInfo,
   LlmProviderInfo,
@@ -81,6 +88,8 @@ export interface CommandCodeGoConnectionOptions {
   maxTokens: number
   /** Positive context capacity used when the selected model has no exact value. */
   defaultContextWindow: number
+  /** Inline base64 image bytes one request accepts before it must be offloaded. */
+  maxRequestImageBytes: number
   /** Scanned Go catalog; requests remain unrestricted. */
   models: readonly CommandCodeGoModel[]
   /** Provider-owned model-request retry policy, already resolved. */
@@ -98,21 +107,33 @@ export interface CommandCodeGoAdapterOptions {
    * one keeps working for text-only traffic.
    */
   resolveAttachments?: () => AttachmentStore | undefined
+  /**
+   * Map one durable image's stored host object into the current tool execution
+   * world, so an offloaded occurrence still names a path the model can read.
+   */
+  resolveImageAccess?: (attachments: AttachmentStore, ref: ImageAttachmentRef) => ImageAttachmentAccess | undefined
 }
 
 /** Default maximum idle interval while an adapter stream read is outstanding. */
 export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
 /** Default combined request/response context capacity. */
 export const DEFAULT_CONTEXT_WINDOW = 1_000_000
+/**
+ * Default inline image budget for one request, deliberately below the official
+ * pi-ai adapter's 20 MiB: the gateway stream is stateless, so every retained
+ * image rides every turn again, and a smaller budget keeps a long conversation
+ * from re-sending megabytes of images on each request.
+ */
+export const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 4_194_304
 export { DEFAULT_MAX_TOKENS }
 
 const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 
 /**
- * Per-image request budget, matching the official pi-ai adapter's defaults:
- * the full 2048px normalized attachment, re-encoded to fit 1MiB per image.
+ * Per-image request budget: the full 2048px normalized attachment, re-encoded
+ * to fit 512KiB per image.
  */
-const REQUEST_IMAGE_POLICY = { maxPixels: 4_194_304, maxBytes: 1_048_576 }
+const REQUEST_IMAGE_POLICY = { maxPixels: 4_194_304, maxBytes: 524_288 }
 
 /**
  * Deterministic request target for one source image under the route budgets.
@@ -130,6 +151,30 @@ function requestImageTarget(ref: ImageAttachmentRef): ImageRequestTarget & { max
 
 function effortInfo(effort: string): { id: ReturnType<typeof ReasoningEffortId>, name: string } {
   return { id: ReasoningEffortId(effort), name: GATEWAY_EFFORTS[effort] ?? effort }
+}
+
+/**
+ * The exact base64 length of one request image, which is the representation the
+ * gateway carries: every occurrence of a shared attachment counts again.
+ * @param bytes - encoded byte length of the request version.
+ * @returns the base64 character count.
+ */
+function base64Length(bytes: number): number {
+  return 4 * Math.ceil(bytes / 3)
+}
+
+/** Exact base64 length of one attachment's resolved request version. */
+function requestImageVersions(
+  versions: readonly RequestImageAttachment[],
+): (block: ImageBlock) => number {
+  const lengths = new Map(versions.map(version => [version.attachment.attachmentId, version.bytes]))
+  return (block) => {
+    const bytes = lengths.get(block.attachment.attachmentId)
+    if (bytes === undefined) {
+      throw new LlmError(`no request bytes resolved for image attachment ${block.attachment.attachmentId}`, 'MISSING_ATTACHMENT')
+    }
+    return base64Length(bytes)
+  }
 }
 
 function modelInfo(provider: string, model: CommandCodeGoModel): LlmModelInfo {
@@ -179,13 +224,19 @@ export class CommandCodeGoAdapter extends LlmAdapter {
   }
 
   /**
-   * Resolve the request bytes for every image in the conversation. The
+   * Resolve the request bytes for every retained image in the conversation. The
    * attachment service is optional: a deployment without one keeps serving
    * text-only traffic and fails loud only when an image actually arrives.
+   *
+   * A request that exceeds the route's image budget fails with
+   * `IMAGE_OFFLOAD_REQUIRED` naming how many oldest occurrences must be
+   * offloaded; the harness logs that selection and retries, so no image is ever
+   * dropped without a durable decision.
    */
   private async prepareRequestImages(
     messages: RequestMessage[],
     signal: AbortSignal | undefined,
+    maxRequestImageBytes: number,
   ): Promise<RequestImages | undefined> {
     const refs = collectRequestImages(messages)
     if (refs.length === 0) return undefined
@@ -194,7 +245,36 @@ export class CommandCodeGoAdapter extends LlmAdapter {
       throw new LlmError('image input requires the durable attachment service', 'UNSUPPORTED_CONTENT')
     }
     const versions = await Promise.all(refs.map(ref => attachments.readImageRequest(ref, requestImageTarget(ref), signal)))
+    const offloadImages = requiredImageOffload(messages, {
+      representation: 'base64',
+      maxBytes: maxRequestImageBytes,
+    }, requestImageVersions(versions))
+    if (offloadImages > 0) {
+      throw new LlmError(
+        `commandcode-go request images exceed the ${maxRequestImageBytes}-byte base64 budget;`
+        + ` ${offloadImages} more oldest occurrence(s) must be offloaded.`,
+        IMAGE_OFFLOAD_REQUIRED_CODE,
+        { offloadImages },
+      )
+    }
     return new Map(versions.map(version => [version.attachment.attachmentId, version]))
+  }
+
+  /**
+   * The one projection every request shares: an offloaded occurrence reaches
+   * the gateway as placeholder text instead of bytes, and only retained
+   * occurrences are resolved, encoded, and sent.
+   */
+  private requestMessages(messages: RequestMessage[]): RequestMessage[] {
+    const attachments = this.config.resolveAttachments?.()
+    const resolveImageAccess = this.config.resolveImageAccess
+    const projected = projectOffloadedImages(messages, (ref) => offloadedImageText(
+      ref,
+      attachments === undefined || resolveImageAccess === undefined
+        ? undefined
+        : resolveImageAccess(attachments, ref),
+    ))
+    return projected === messages ? messages : [...projected]
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
@@ -287,8 +367,9 @@ export class CommandCodeGoAdapter extends LlmAdapter {
     connection: CommandCodeGoConnectionOptions,
     apiKey: string,
   ): AsyncIterable<StreamChunk> {
-    const images = await this.prepareRequestImages(options.messages, signal)
-    const body = buildRequest(options, images)
+    const messages = this.requestMessages(options.messages)
+    const images = await this.prepareRequestImages(messages, signal, connection.maxRequestImageBytes)
+    const body = buildRequest({ ...options, messages }, images)
     const payload = JSON.stringify(body)
     const headers: Record<string, string> = {
       'authorization': `Bearer ${apiKey}`,

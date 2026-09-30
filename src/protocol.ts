@@ -146,10 +146,14 @@ function flattenText(blocks: readonly ContentBlock[]): string {
     .join('')
 }
 
-/** The attachment refs of the image blocks in one content list. */
+/**
+ * The attachment refs of the image blocks in one content list that still need
+ * request bytes. An occurrence the harness already offloaded is deliberately
+ * absent: it reaches the gateway as placeholder text, never as bytes.
+ */
 function imageRefs(blocks: readonly ContentBlock[]): ImageAttachmentRef[] {
   return blocks
-    .filter((block): block is Extract<ContentBlock, { type: 'image' }> => block.type === 'image')
+    .filter((block): block is Extract<ContentBlock, { type: 'image' }> => block.type === 'image' && block.offloaded !== true)
     .map(block => block.attachment)
 }
 
@@ -269,6 +273,8 @@ function serializeTool(message: ToolResultMessage, images: RequestImages | undef
 /**
  * The ordered, de-duplicated image refs a request needs bytes for, rejecting
  * images in roles the gateway cannot carry (assistant and developer history).
+ * Occurrences the harness already offloaded need no bytes and are never
+ * returned, so a caller cannot resolve an image the route must not send.
  */
 export function collectRequestImages(messages: readonly RequestMessage[]): ImageAttachmentRef[] {
   const refs = new Map<string, ImageAttachmentRef>()

@@ -25,20 +25,21 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { assertUsableApiKey, errorChain, LlmError, resolveRetryPolicy, RetryPolicySchema } from '@deepseek-ai/dsh-llm'
+import { assertUsableApiKey, errorChain, LlmError, resolveImageAttachmentAccess, resolveRetryPolicy, RetryPolicySchema } from '@deepseek-ai/dsh-llm'
 import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
 // Augments Context with `fiber.entry` and the `loader/volatile-update` event.
 import type {} from '@deepseek-ai/cordis-plugin-loader'
-import { CommandCodeGoAdapter, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, DEFAULT_STREAM_IDLE_TIMEOUT_MS } from './adapter.js'
+import { CommandCodeGoAdapter, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_REQUEST_IMAGE_BYTES, DEFAULT_MAX_TOKENS, DEFAULT_STREAM_IDLE_TIMEOUT_MS } from './adapter.js'
 import type { CommandCodeGoConnectionOptions, CommandCodeGoModel } from './adapter.js'
 import { fetchCatalog, fetchGoModels } from './models.js'
 
 export {
   CommandCodeGoAdapter,
   DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_REQUEST_IMAGE_BYTES,
   DEFAULT_MAX_TOKENS,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
 } from './adapter.js'
@@ -74,6 +75,8 @@ export interface AccountProfile {
   maxTokens?: number
   /** Positive context capacity used when the selected model has no exact value; defaults to the top-level value. */
   defaultContextWindow?: number
+  /** Inline image budget for one request; defaults to the top-level value. */
+  maxRequestImageBytes?: number
   /** Provider-owned model-request retry policy; defaults to the top-level `retryPolicy`. */
   retryPolicy?: RetryPolicyConfig
 }
@@ -93,6 +96,14 @@ export interface Config {
   maxTokens?: number
   /** Positive context capacity used when the selected model has no exact value (default 1,000,000). Also every account's default. */
   defaultContextWindow?: number
+  /**
+   * Inline base64 image bytes one request accepts before it must be offloaded
+   * (default 4 MiB). Images are re-sent on every turn because the gateway keeps
+   * no server-side copy, so a request above this budget fails with
+   * `IMAGE_OFFLOAD_REQUIRED`; the harness then records the oldest occurrences
+   * as offloaded and retries. Also every account's default.
+   */
+  maxRequestImageBytes?: number
   /** Provider-owned model-request retry policy; omission uses normal defaults. Also every account's default. */
   retryPolicy?: RetryPolicyConfig
 }
@@ -103,6 +114,7 @@ export const AccountProfile: z<AccountProfile> = z.object({
   baseURL: z.string(),
   maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
   defaultContextWindow: z.number().step(1).min(1),
+  maxRequestImageBytes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
   retryPolicy: RetryPolicySchema,
 })
 
@@ -112,6 +124,7 @@ export const Config = z.object({
   baseURL: z.string().default(DEFAULT_BASE_URL).volatile(),
   maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(DEFAULT_MAX_TOKENS).volatile(),
   defaultContextWindow: z.number().step(1).min(1).default(DEFAULT_CONTEXT_WINDOW).volatile(),
+  maxRequestImageBytes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(DEFAULT_MAX_REQUEST_IMAGE_BYTES).volatile(),
   retryPolicy: RetryPolicySchema.volatile(),
 })
 
@@ -134,6 +147,7 @@ function liveConfig(config: LiveConfig): Config {
     baseURL: config.baseURL.get(),
     maxTokens: config.maxTokens.get(),
     defaultContextWindow: config.defaultContextWindow.get(),
+    maxRequestImageBytes: config.maxRequestImageBytes.get(),
     retryPolicy: config.retryPolicy.get(),
   }) as Config
 }
@@ -166,6 +180,7 @@ export function resolveAccounts(config: Config, scanned: readonly CommandCodeGoM
     baseURL: profile?.baseURL ?? config.baseURL ?? DEFAULT_BASE_URL,
     maxTokens: profile?.maxTokens ?? config.maxTokens ?? DEFAULT_MAX_TOKENS,
     defaultContextWindow: profile?.defaultContextWindow ?? config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    maxRequestImageBytes: profile?.maxRequestImageBytes ?? config.maxRequestImageBytes ?? DEFAULT_MAX_REQUEST_IMAGE_BYTES,
     models: scanned,
     retryPolicy: resolveRetryPolicy(profile?.retryPolicy ?? config.retryPolicy, 'commandcode-go-provider: retryPolicy'),
   }]))
@@ -239,6 +254,13 @@ export function apply(ctx: Context, config: LiveConfig): void {
         return undefined
       }
     },
+    // Bridges the stored image object into the current tool execution world, so
+    // an offloaded occurrence still names a path the model can read.
+    resolveImageAccess: (attachments, ref) => resolveImageAttachmentAccess(
+      attachments,
+      hostPath => ctx.get('fs')?.processPathFromHostPath(hostPath),
+      ref,
+    ),
   })
 
   /**
