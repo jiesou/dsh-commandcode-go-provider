@@ -51,6 +51,8 @@ export interface CommandCodeGoConnectionOptions {
     models: readonly CommandCodeGoModel[];
     /** Provider-owned model-request retry policy, already resolved. */
     retryPolicy: ResolvedRetryPolicy;
+    /** Send gateway traffic over HTTP/1.1 instead of the runtime default. */
+    http1: boolean;
 }
 /** Constructor options for {@link CommandCodeGoAdapter}. */
 export interface CommandCodeGoAdapterOptions {

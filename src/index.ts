@@ -106,6 +106,13 @@ export interface Config {
   maxRequestImageBytes?: number
   /** Provider-owned model-request retry policy; omission uses normal defaults. Also every account's default. */
   retryPolicy?: RetryPolicyConfig
+  /**
+   * Send gateway traffic over HTTP/1.1 (default `false`: the runtime's own
+   * protocol choice, HTTP/2 on Node >= 26). The gateway's edge resets HTTP/2
+   * streams with `ENHANCE_YOUR_CALM` under concurrent traffic; HTTP/1.1 turns
+   * the same limit into a readable 429.
+   */
+  http1?: boolean
 }
 
 export const AccountProfile: z<AccountProfile> = z.object({
@@ -126,6 +133,7 @@ export const Config = z.object({
   defaultContextWindow: z.number().step(1).min(1).default(DEFAULT_CONTEXT_WINDOW).volatile(),
   maxRequestImageBytes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(DEFAULT_MAX_REQUEST_IMAGE_BYTES).volatile(),
   retryPolicy: RetryPolicySchema.volatile(),
+  http1: z.boolean().default(false).volatile(),
 })
 
 /**
@@ -149,6 +157,7 @@ function liveConfig(config: LiveConfig): Config {
     defaultContextWindow: config.defaultContextWindow.get(),
     maxRequestImageBytes: config.maxRequestImageBytes.get(),
     retryPolicy: config.retryPolicy.get(),
+    http1: config.http1.get(),
   }) as Config
 }
 
@@ -183,6 +192,7 @@ export function resolveAccounts(config: Config, scanned: readonly CommandCodeGoM
     maxRequestImageBytes: profile?.maxRequestImageBytes ?? config.maxRequestImageBytes ?? DEFAULT_MAX_REQUEST_IMAGE_BYTES,
     models: scanned,
     retryPolicy: resolveRetryPolicy(profile?.retryPolicy ?? config.retryPolicy, 'commandcode-go-provider: retryPolicy'),
+    http1: config.http1 ?? false,
   }]))
 }
 

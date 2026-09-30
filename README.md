@@ -61,6 +61,7 @@ echo 'COMMANDCODE_API_KEY: [your key, be like user_xxxx]' >> ~/.dsh/.credentials
 | `defaultContextWindow` | `number` | `1000000` | 模型无精确 contextWindow 时的兜底值 |
 | `maxRequestImageBytes` | `number` | `4194304`（4 MiB） | 单次请求允许内联的 base64 图片字节上限 |
 | `accounts` | `object` | `{}` | 多账号字典：每个 key 是一个独立 provider 路由。缺省或空 = 单账号模式，直接使用顶层字段 |
+| `http1` | `boolean` | `false` | 用 HTTP/1.1 发网关请求。Node ≥ 26 的 `fetch` 默认协商 HTTP/2 并把请求多路复用到一条连接上，网关边缘（Cloudflare）在高并发下会用 `ENHANCE_YOUR_CALM` 重置流；HTTP/1.1 把同一个限流变成可读的 429 |
 
 ### 多账号
 

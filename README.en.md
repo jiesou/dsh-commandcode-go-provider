@@ -63,6 +63,7 @@ All fields optional, defaults work out of the box:
 | `defaultContextWindow` | `number` | `1000000` | Fallback context capacity when a model has no exact value |
 | `maxRequestImageBytes` | `number` | `4194304` (4 MiB) | Inline base64 image budget for one request |
 | `accounts` | `object` | `{}` | Multi-account dictionary: each key is an independent provider route. Absent or empty = single-account mode driven by the top-level fields |
+| `http1` | `boolean` | `false` | Send gateway requests over HTTP/1.1. Node ≥ 26 negotiates HTTP/2 for `fetch` and multiplexes everything onto one connection; the gateway's edge (Cloudflare) resets streams with `ENHANCE_YOUR_CALM` under that concurrency. HTTP/1.1 turns the same limit into a readable 429 |
 
 ### Multiple accounts
 

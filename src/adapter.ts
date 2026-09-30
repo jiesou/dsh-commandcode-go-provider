@@ -94,6 +94,8 @@ export interface CommandCodeGoConnectionOptions {
   models: readonly CommandCodeGoModel[]
   /** Provider-owned model-request retry policy, already resolved. */
   retryPolicy: ResolvedRetryPolicy
+  /** Send gateway traffic over HTTP/1.1 instead of the runtime default. */
+  http1: boolean
 }
 
 /** Constructor options for {@link CommandCodeGoAdapter}. */
@@ -128,6 +130,26 @@ export const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 4_194_304
 export { DEFAULT_MAX_TOKENS }
 
 const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
+
+/**
+ * One process-wide HTTP/1.1 dispatcher, built on first use and shared by every
+ * request so connections keep pooling.
+ *
+ * Node >= 26 negotiates HTTP/2 for `fetch` by default and multiplexes all
+ * gateway traffic onto a single connection; the gateway's Cloudflare edge
+ * answers that burst shape by resetting streams with `ENHANCE_YOUR_CALM`,
+ * which arrives here as a transport failure rather than a readable 429.
+ * HTTP/1.1 keeps the same rate limit an ordinary HTTP status. A runtime
+ * without the `undici` seam keeps the default instead of failing the request.
+ */
+let http1Dispatcher: Promise<unknown> | undefined
+
+function gatewayDispatcher(): Promise<unknown> {
+  http1Dispatcher ??= import('undici')
+    .then(({ Agent }) => new Agent({ allowH2: false }))
+    .catch(() => undefined)
+  return http1Dispatcher
+}
 
 /**
  * Per-image request budget: the full 2048px normalized attachment, re-encoded
@@ -382,12 +404,15 @@ export class CommandCodeGoAdapter extends LlmAdapter {
 
     let response: Response
     try {
-      response = await fetch(`${connection.baseURL}/alpha/generate`, {
+      const init: RequestInit & { dispatcher?: unknown } = {
         method: 'POST',
         headers,
         body: payload,
         signal,
-      })
+      }
+      const dispatcher = connection.http1 ? await gatewayDispatcher() : undefined
+      if (dispatcher !== undefined) init.dispatcher = dispatcher
+      response = await fetch(`${connection.baseURL}/alpha/generate`, init)
     } catch (error: unknown) {
       if (signal.aborted) throw error
       // errorChain unwraps undici's `TypeError: fetch failed` down to the real
