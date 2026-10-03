@@ -437,7 +437,7 @@ export class CommandCodeGoAdapter extends LlmAdapter {
       throw new LlmError('returned no response body', 'EMPTY_RESPONSE')
     }
 
-    const state = chunkState()
+    const state = chunkState(new Map((options.tools ?? []).map(tool => [tool.name, tool.parameters])))
     for await (const event of parseEventStream(response.body)) {
       // A mid-stream failure arrives as an event, not an HTTP status; its
       // message is the only account of what went wrong.

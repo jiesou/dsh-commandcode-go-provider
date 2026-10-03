@@ -18,8 +18,15 @@
  */
 import type { GenerateOptions, RequestMessage, StreamChunk } from '@deepseek-ai/dsh-llm';
 import type { ImageAttachmentRef, RequestImageAttachment } from '@deepseek-ai/dsh-attachment';
-/** Gateway version pinned to a known-good Command Code CLI release. */
-export declare const CC_VERSION = "0.26.20";
+/**
+ * Gateway version pinned to a known-good Command Code CLI release.
+ *
+ * The gateway refuses a request whose version is missing (`403
+ * upgrade_required`) and reads the client's feature set off this header, so it
+ * tracks the published CLI rather than a release we happened to test against:
+ * this is what `command-code@latest` ships.
+ */
+export declare const CC_VERSION = "1.74.0";
 /** Last-resort output cap when a request carries no maxTokens (matches the adapter default). */
 export declare const DEFAULT_MAX_TOKENS = 64000;
 /**
@@ -91,7 +98,6 @@ type CcMessage = {
 /** Resolved request bytes per attachment id, prepared by the adapter before serialization. */
 export type RequestImages = ReadonlyMap<string, RequestImageAttachment>;
 interface CcTool {
-    type: 'function';
     name: string;
     description?: string;
     input_schema: unknown;
@@ -156,9 +162,11 @@ export interface ChunkState {
     openTextual: Map<number, 'text' | 'reasoning'>;
     /** Whether a `usage` chunk was already emitted (`finish-step` precedes `finish`). */
     usageSeen: boolean;
+    /** The request's declared argument schemas per tool, for {@link dropNullArguments}. */
+    toolSchemas?: ReadonlyMap<string, unknown>;
 }
 /** Fresh translation state for one gateway stream. */
-export declare function chunkState(): ChunkState;
+export declare function chunkState(toolSchemas?: ReadonlyMap<string, unknown>): ChunkState;
 /**
  * Translate one gateway stream event into one or more harness StreamChunks.
  * @returns an empty array when the event has no harness representation.

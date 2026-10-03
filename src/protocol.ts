@@ -32,8 +32,15 @@ import type {
 import type { ImageAttachmentRef, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { platform, arch } from 'node:os'
 
-/** Gateway version pinned to a known-good Command Code CLI release. */
-export const CC_VERSION = '0.26.20'
+/**
+ * Gateway version pinned to a known-good Command Code CLI release.
+ *
+ * The gateway refuses a request whose version is missing (`403
+ * upgrade_required`) and reads the client's feature set off this header, so it
+ * tracks the published CLI rather than a release we happened to test against:
+ * this is what `command-code@latest` ships.
+ */
+export const CC_VERSION = '1.74.0'
 
 /** Last-resort output cap when a request carries no maxTokens (matches the adapter default). */
 export const DEFAULT_MAX_TOKENS = 64_000
@@ -99,7 +106,6 @@ type CcMessage =
 export type RequestImages = ReadonlyMap<string, RequestImageAttachment>
 
 interface CcTool {
-  type: 'function'
   name: string
   description?: string
   input_schema: unknown
@@ -136,6 +142,96 @@ interface CcRequestEnvelope {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * How the gateway wire spells an argument the model does not need to send.
+ *
+ * The gateway forwards every tool to the OpenAI Responses API as a function
+ * tool and never fills in that API's `strict` field, which defaults to `true`:
+ * the upstream then reads the schema as if *every* declared property were
+ * required. A `bash` call asked only to list a directory comes back carrying an
+ * invented `timeoutMs`, `workdir` and `run_in_background`, and a property the
+ * schema marks optional but the model has nothing to say about arrives holding
+ * its own description text as the value.
+ *
+ * Optionality therefore has to be spelled as nullability on this wire: an
+ * optional property accepts `null` and says so in its description. The adapter
+ * drops those nulls again on the way back ({@link dropNullArguments}), so the
+ * harness sees exactly the arguments the model meant to pass.
+ */
+const NULL_ARGUMENT_HINT = 'Leave this out by passing null unless you need a value other than the default.'
+
+/** Whether a schema node already accepts an explicit `null`. */
+function allowsNull(schema: unknown): boolean {
+  if (!isRecord(schema)) return false
+  if (schema.type === 'null') return true
+  if (Array.isArray(schema.type) && schema.type.includes('null')) return true
+  if (schema.const === null) return true
+  if (Array.isArray(schema.enum) && schema.enum.includes(null)) return true
+  return Array.isArray(schema.anyOf) && schema.anyOf.some(allowsNull)
+}
+
+/** One optional property as the wire's nullable shape, hinting at the null. */
+function optionalAsNull(property: Record<string, unknown>): Record<string, unknown> {
+  const description = typeof property.description === 'string' && property.description.length > 0
+    ? `${property.description} ${NULL_ARGUMENT_HINT}`
+    : NULL_ARGUMENT_HINT
+  return {
+    anyOf: [
+      { ...property, description },
+      { type: 'null', description: 'Use null when you do not need this argument.' },
+    ],
+  }
+}
+
+/**
+ * One tool's argument schema in the shape the gateway wire expects: every
+ * property the declaration leaves optional becomes nullable, at every depth.
+ * A property that already accepts null, and every other schema node, is left
+ * as the harness declared it.
+ */
+function clientSchema(parameters: unknown): unknown {
+  if (!isRecord(parameters)) return parameters
+  const schema: Record<string, unknown> = { ...parameters }
+  if (isRecord(parameters.properties)) {
+    const required = new Set(Array.isArray(parameters.required) ? parameters.required : [])
+    const properties: Record<string, unknown> = {}
+    for (const [name, property] of Object.entries(parameters.properties)) {
+      const declared = clientSchema(property)
+      properties[name] = !required.has(name) && isRecord(declared) && !allowsNull(declared)
+        ? optionalAsNull(declared)
+        : declared
+    }
+    schema.properties = properties
+  }
+  if (parameters.items !== undefined) schema.items = clientSchema(parameters.items)
+  if (Array.isArray(parameters.anyOf)) schema.anyOf = parameters.anyOf.map(clientSchema)
+  return schema
+}
+
+/**
+ * Drop the nulls {@link clientSchema} invites: a null in an optional property's
+ * place means "not passed", so the harness reads the argument as absent and the
+ * tool's own default applies. A null the declaration sanctions stays put.
+ */
+function dropNullArguments(value: unknown, schema: unknown): unknown {
+  if (Array.isArray(value)) {
+    const items = isRecord(schema) ? schema.items : undefined
+    return value.map(entry => dropNullArguments(entry, items))
+  }
+  if (!isRecord(value)) return value
+  const properties = isRecord(schema) && isRecord(schema.properties) ? schema.properties : undefined
+  const required = new Set(isRecord(schema) && Array.isArray(schema.required) ? schema.required : [])
+  const dropped: Record<string, unknown> = {}
+  for (const [name, entry] of Object.entries(value)) {
+    if (entry === null) {
+      const declared = properties?.[name]
+      if (declared !== undefined && !required.has(name) && !allowsNull(declared)) continue
+    }
+    dropped[name] = dropNullArguments(entry, properties?.[name])
+  }
+  return dropped
 }
 
 /** The flattened text of a message's content blocks. */
@@ -252,14 +348,23 @@ function serializeUser(message: UserMessage | RequestUserInput, images: RequestI
  * Images cannot ride the gateway's text-only tool output, so they follow as a
  * plain user turn — the only role the gateway carries inline images in — and
  * {@link buildRequest} holds that turn past the end of the tool run.
+ *
+ * `toolName` is resolved from the assistant tool-call that produced the result
+ * (the CLI's own `toWireMessages` looks the name up the same way), falling back
+ * to `'unknown'` only for a call the history does not carry.
  */
-function serializeTool(message: ToolResultMessage, images: RequestImages | undefined): CcMessage[] {
+function serializeTool(
+  message: ToolResultMessage,
+  images: RequestImages | undefined,
+  toolNames: ReadonlyMap<string, string>,
+): CcMessage[] {
+  const toolCallId = sanitizeToolCallId(message.toolCallId)
   const wire: CcMessage[] = [{
     role: 'tool',
     content: [{
       type: 'tool-result',
-      toolCallId: sanitizeToolCallId(message.toolCallId),
-      toolName: 'unknown',
+      toolCallId,
+      toolName: toolNames.get(toolCallId) ?? 'unknown',
       output: toolResultOutput(message),
     }],
   }]
@@ -324,6 +429,16 @@ export function buildRequest(options: GenerateOptions, images?: RequestImages): 
     if (turn.role === 'user') flushDeferred()
     messages.push(turn)
   }
+  // A tool result's `toolName` names the tool whose schema produced the call, so
+  // it is read off the assistant tool-call the result answers — the same lookup
+  // the CLI's `toWireMessages` does — rather than stamped with a constant.
+  const toolNames = new Map<string, string>()
+  for (const message of options.messages) {
+    if (message.role !== 'assistant') continue
+    for (const block of message.content) {
+      if (block.type === 'tool-call') toolNames.set(sanitizeToolCallId(block.id), block.name)
+    }
+  }
   for (const message of options.messages) {
     switch (message.role) {
       case 'system':
@@ -341,7 +456,7 @@ export function buildRequest(options: GenerateOptions, images?: RequestImages): 
         pushTurn(serializeAssistant(message))
         break
       case 'tool':
-        for (const turn of serializeTool(message, images)) pushTurn(turn)
+        for (const turn of serializeTool(message, images, toolNames)) pushTurn(turn)
         break
       default:
         for (const turn of serializeUser(message, images)) pushTurn(turn)
@@ -351,10 +466,9 @@ export function buildRequest(options: GenerateOptions, images?: RequestImages): 
 
   const tools: CcTool[] = (options.tools ?? [])
     .map((tool: ToolSchema) => ({
-      type: 'function' as const,
       name: tool.name,
       ...tool.description === undefined ? {} : { description: tool.description },
-      input_schema: tool.parameters,
+      input_schema: clientSchema(tool.parameters),
     }))
 
   const params: CcRequestEnvelope['params'] = {
@@ -411,11 +525,13 @@ export interface ChunkState {
   openTextual: Map<number, 'text' | 'reasoning'>
   /** Whether a `usage` chunk was already emitted (`finish-step` precedes `finish`). */
   usageSeen: boolean
+  /** The request's declared argument schemas per tool, for {@link dropNullArguments}. */
+  toolSchemas?: ReadonlyMap<string, unknown>
 }
 
 /** Fresh translation state for one gateway stream. */
-export function chunkState(): ChunkState {
-  return { blockIndex: 0, texts: new Map(), toolCalls: new Map(), openTextual: new Map(), usageSeen: false }
+export function chunkState(toolSchemas?: ReadonlyMap<string, unknown>): ChunkState {
+  return { blockIndex: 0, texts: new Map(), toolCalls: new Map(), openTextual: new Map(), usageSeen: false, toolSchemas }
 }
 
 function closeTextual(state: ChunkState, index: number, type: 'text' | 'reasoning'): StreamChunk[] {
@@ -482,11 +598,13 @@ export function eventToChunks(
       break
     }
     case 'tool-call': {
-      const input = event.input ?? event.args ?? event.arguments
       const callId = typeof event.toolCallId === 'string' ? event.toolCallId
         : typeof event.id === 'string' ? event.id
           : ''
       const name = typeof event.toolName === 'string' ? event.toolName : undefined
+      const raw = event.input ?? event.args ?? event.arguments
+      const declared = name === undefined ? undefined : state.toolSchemas?.get(name)
+      const input = declared === undefined ? raw : dropNullArguments(raw, declared)
       const argumentsDelta = JSON.stringify(input ?? {})
       chunks.push({ type: 'block-start', index: state.blockIndex, blockType: 'tool-call' })
       const known = state.toolCalls.get(state.blockIndex)
