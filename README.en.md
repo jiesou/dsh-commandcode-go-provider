@@ -52,7 +52,7 @@ All fields optional, defaults work out of the box:
     baseURL: https://api.commandcode.ai
     maxTokens: 64000
     defaultContextWindow: 1000000
-    maxRequestImageBytes: 4194304
+    maxRequestImageBytes: 2097152
 ```
 
 | Field | Type | Default | Description |
@@ -61,7 +61,7 @@ All fields optional, defaults work out of the box:
 | `baseURL` | `string` | `"https://api.commandcode.ai"` | Command Code gateway base URL; `/alpha/generate` is appended |
 | `maxTokens` | `number` | `64000` | Per-request output token cap |
 | `defaultContextWindow` | `number` | `1000000` | Fallback context capacity when a model has no exact value |
-| `maxRequestImageBytes` | `number` | `4194304` (4 MiB) | Inline base64 image budget for one request |
+| `maxRequestImageBytes` | `number` | `2097152` (2 MiB) | Inline base64 image budget for one request |
 | `accounts` | `object` | `{}` | Multi-account dictionary: each key is an independent provider route. Absent or empty = single-account mode driven by the top-level fields |
 | `http1` | `boolean` | `false` | Send gateway requests over HTTP/1.1. Node ≥ 26 negotiates HTTP/2 for `fetch` and multiplexes everything onto one connection; the gateway's edge (Cloudflare) resets streams with `ENHANCE_YOUR_CALM` under that concurrency. HTTP/1.1 turns the same limit into a readable 429 |
 
@@ -103,11 +103,11 @@ Reasoning effort needs no configuration: levels come from the official CLI catal
 
 `/alpha/generate` is stateless: the gateway stores no image and exposes no upload endpoint (the official CLI also re-sends every historical image inline on every turn). So this plugin follows the DSH route standard:
 
-- Each image is re-encoded to fit 512 KiB (under a 2048×2048 pixel budget).
-- When the inline base64 images of one request exceed `maxRequestImageBytes` (default 4 MiB), no request is sent; the adapter throws `IMAGE_OFFLOAD_REQUIRED` naming how many occurrences must be offloaded. DSH records the **oldest** ones in an `image/offload` event and retries; from then on their bytes are replaced by placeholder text that still names the image identity and a readable path.
+- Each image is re-encoded to fit 1 MiB (under a 2048×2048 pixel budget).
+- When the inline base64 images of one request exceed `maxRequestImageBytes` (default 2 MiB), no request is sent; the adapter throws `IMAGE_OFFLOAD_REQUIRED` naming how many occurrences must be offloaded. DSH records the **oldest** ones in an `image/offload` event and retries; from then on their bytes are replaced by placeholder text that still names the image identity and a readable path.
 - An offloaded image is never read, encoded, or uploaded again.
 
-Lower `maxRequestImageBytes` to save more bandwidth; raise it to keep more images visible to the model. It must stay above the 512 KiB per-image cap, or not even one image fits.
+Both values count base64 characters (about 4/3 of the raw bytes). The default pair holds one full-size image plus one half-size image: lower them to save more bandwidth, raise them to keep more images visible to the model. Keep `maxRequestImageBytes` above one image's base64 length (a 1 MiB image is ~1.4 MB), or not even one image fits.
 
 ## Compatibility
 

@@ -76,12 +76,12 @@ export declare const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300000;
 /** Default combined request/response context capacity. */
 export declare const DEFAULT_CONTEXT_WINDOW = 1000000;
 /**
- * Default inline image budget for one request, deliberately below the official
- * pi-ai adapter's 20 MiB: the gateway stream is stateless, so every retained
- * image rides every turn again, and a smaller budget keeps a long conversation
- * from re-sending megabytes of images on each request.
+ * Default inline image budget for one request: 2 MiB of base64, with the same
+ * 1 MiB per image the pi-ai routes use. The gateway stream is stateless, so
+ * every retained image rides every turn again; one full-size image is ~1.4 MB
+ * on the wire and fits with room for a second before the oldest is offloaded.
  */
-export declare const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 4194304;
+export declare const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 2097152;
 export { DEFAULT_MAX_TOKENS };
 /**
  * Command Code Go adapter. One instance serves every configured account; the

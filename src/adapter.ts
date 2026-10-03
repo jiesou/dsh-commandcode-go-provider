@@ -121,12 +121,12 @@ export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
 /** Default combined request/response context capacity. */
 export const DEFAULT_CONTEXT_WINDOW = 1_000_000
 /**
- * Default inline image budget for one request, deliberately below the official
- * pi-ai adapter's 20 MiB: the gateway stream is stateless, so every retained
- * image rides every turn again, and a smaller budget keeps a long conversation
- * from re-sending megabytes of images on each request.
+ * Default inline image budget for one request: 2 MiB of base64, with the same
+ * 1 MiB per image the pi-ai routes use. The gateway stream is stateless, so
+ * every retained image rides every turn again; one full-size image is ~1.4 MB
+ * on the wire and fits with room for a second before the oldest is offloaded.
  */
-export const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 4_194_304
+export const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 2_097_152
 export { DEFAULT_MAX_TOKENS }
 
 const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
@@ -153,9 +153,9 @@ function gatewayDispatcher(): Promise<unknown> {
 
 /**
  * Per-image request budget: the full 2048px normalized attachment, re-encoded
- * to fit 512KiB per image.
+ * to fit 1MiB per image (the same per-image bound the pi-ai routes use).
  */
-const REQUEST_IMAGE_POLICY = { maxPixels: 4_194_304, maxBytes: 524_288 }
+const REQUEST_IMAGE_POLICY = { maxPixels: 4_194_304, maxBytes: 1_048_576 }
 
 /**
  * Deterministic request target for one source image under the route budgets.
