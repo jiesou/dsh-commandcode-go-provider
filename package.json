@@ -82,6 +82,7 @@
     "@deepseek-ai/dsh-util-values": "0.2.0-rc.2",
     "@deepseek-ai/schemastery": "^3.18.4",
     "@types/node": "^22.20.1",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "undici": "^8.12.1"
   }
 }
