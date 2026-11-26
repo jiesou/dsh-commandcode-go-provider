@@ -31,6 +31,7 @@ import {
   resolveImageAttachmentAccess,
 } from '@deepseek-ai/dsh-llm'
 import type {
+  BuiltinLlmFailureCode,
   GenerateOptions,
   ImageAttachmentAccess,
   ImageBlock,
@@ -193,7 +194,7 @@ function requestImageVersions(
   return (block) => {
     const bytes = lengths.get(block.attachment.attachmentId)
     if (bytes === undefined) {
-      throw new LlmError(`no request bytes resolved for image attachment ${block.attachment.attachmentId}`, 'MISSING_ATTACHMENT')
+      throw new LlmError(`no request bytes resolved for image attachment ${block.attachment.attachmentId}`, 'UNSUPPORTED_CONTENT')
     }
     return base64Length(bytes)
   }
@@ -472,8 +473,8 @@ export class CommandCodeGoAdapter extends LlmAdapter {
  * key is fine when the plan is not, and an exhausted balance is terminal
  * where a rate limit is not.
  */
-function upstreamErrorCode(status: number, detail: string): string {
-  if (detail.includes('MODEL_NOT_IN_PLAN')) return 'PERMISSION'
+function upstreamErrorCode(status: number, detail: string): BuiltinLlmFailureCode {
+  if (detail.includes('MODEL_NOT_IN_PLAN')) return 'MODEL_UNSUPPORTED'
   if (detail.includes('PREMIUM_CREDITS_EXHAUSTED') || isQuotaExceededError(detail)) return QUOTA_EXCEEDED_CODE
   if (status === 429 || detail.includes('RATE_LIMITED')) return 'RATE_LIMIT'
   if (status === 401 || status === 403) return 'AUTH'
@@ -481,5 +482,5 @@ function upstreamErrorCode(status: number, detail: string): string {
     return isContextWindowExceededError(detail) ? CONTEXT_WINDOW_EXCEEDED_CODE : 'INVALID_REQUEST'
   }
   if (status >= 500) return 'SERVER'
-  return `HTTP_${status}`
+  return `HTTP_${status}` as `HTTP_${number}`
 }

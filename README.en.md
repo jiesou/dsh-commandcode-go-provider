@@ -50,6 +50,7 @@ All fields optional, defaults work out of the box:
   config:
     apiKeyEnv: COMMANDCODE_API_KEY
     baseURL: https://api.commandcode.ai
+    plan: go
     maxTokens: 64000
     defaultContextWindow: 1000000
     maxRequestImageBytes: 2097152
@@ -59,6 +60,7 @@ All fields optional, defaults work out of the box:
 | --- | --- | --- | --- |
 | `apiKeyEnv` | `string` | `"COMMANDCODE_API_KEY"` | Env var name (or credential ref) holding the API key |
 | `baseURL` | `string` | `"https://api.commandcode.ai"` | Command Code gateway base URL; `/alpha/generate` is appended |
+| `plan` | `string` | `"go"` | Subscription plan tier (`go` / `goat` / `pro` / `max` / `all`), filters models by official CLI catalog `Min plan` |
 | `maxTokens` | `number` | `64000` | Per-request output token cap |
 | `defaultContextWindow` | `number` | `1000000` | Fallback context capacity when a model has no exact value |
 | `maxRequestImageBytes` | `number` | `2097152` (2 MiB) | Inline base64 image budget for one request |
@@ -77,9 +79,11 @@ The `accounts` dictionary exposes several accounts of the same Go plan as severa
       commandcode-1:
         displayName: Command Code Go 1
         apiKeyEnv: COMMANDCODE_API_KEY
+        plan: go
       commandcode-2:
-        displayName: Command Code Go 2
+        displayName: Command Code Pro 2
         apiKeyEnv: COMMANDCODE_API_KEY_2
+        plan: pro
     baseURL: https://api.commandcode.ai
     retryPolicy:
       mode: always
@@ -90,6 +94,7 @@ The `accounts` dictionary exposes several accounts of the same Go plan as severa
 | `displayName` | `string` | account key | Label shown in the model picker |
 | `apiKeyEnv` | `string` | top-level `apiKeyEnv` | Credential ref for this account, written through its card on the web Models page |
 | `baseURL` | `string` | top-level `baseURL` | Per-account gateway override |
+| `plan` | `string` | top-level `plan` | Per-account plan tier override (`go` / `goat` / `pro` / `max` / `all`) |
 | `maxTokens` | `number` | top-level `maxTokens` | Per-account output cap override |
 | `defaultContextWindow` | `number` | top-level `defaultContextWindow` | Per-account fallback capacity override |
 | `maxRequestImageBytes` | `number` | top-level `maxRequestImageBytes` | Per-account image budget override |
@@ -111,15 +116,14 @@ Both values count base64 characters (about 4/3 of the raw bytes). The default pa
 
 ## Compatibility
 
-Declared in `package.json` under `dsh.compatibility`: DSH `>=0.1.7-alpha.1 <0.2.0`, Node.js `^22.19.0 || >=24.0.0`, profiles `web` / `headless`.
-
-`>=0.1.7-alpha.1` is a hard floor, not a preference: that release made dsh-llm carry tool results as first-class `role: 'tool'` messages (`toolCallId` moved to the message) and rewrote the dsh-settings form model (`installSection` replaced by `SettingsForms`, and a config field only appears on the settings page once it is marked `volatile()`). This plugin implements the new model; the pre-0.1.7 `role: 'user'` + `tool-result` block shape is no longer supported.
+Declared in `package.json` under `dsh.compatibility`: DSH `>=0.2.0-rc.2 <0.3`, Node.js `^22.19.0 || >=24.0.0`, profiles `web` / `headless`.
 
 Per-release evidence (each release installed into a disposable profile with `dsh plugin add <tarball>`, cold-started until it issued a real request, then uninstalled):
 
 | DSH version | install | start | uninstall |
 | --- | --- | --- | --- |
-| 0.1.7-rc.2 | passed | passed | passed |
+| 0.2.0-rc.2 | passed | passed | passed |
+| 0.2.2-rc.2 | passed | passed | passed |
 
 0.1.7-alpha.1 / alpha.2 / rc.1 meet the declared floor but were not each verified end to end.
 
