@@ -58,6 +58,15 @@ const TEXT_ONLY_MODELS: ReadonlySet<string> = new Set([
   'nvidia/nemotron-3-ultra-550b-a55b',
   'poolside/laguna-s-2.1-free',
   'inclusionai/ling-3.0-flash-free',
+  'inclusionai/ling-3.1-flash',
+  'inclusionai/ling-3.1-flash-1019',
+  'inclusionai/ling-3.1-flash-1019:free',
+  'inclusionai/ling-3.1-flash:free',
+  'meituan/longcat-2.0',
+  'meituan/longcat-2.0:free',
+  'recursive/flint-v1.0:free',
+  'reflection/beam:free',
+  'stealth/glyph-cluster:free',
   'xai/grok-4.6',
 ])
 
@@ -74,6 +83,32 @@ export function imageCapable(id: string): boolean {
 /** Context capacity assumed when the listing discloses none. */
 const FALLBACK_CONTEXT_WINDOW = 262_144
 
+/** Supported subscription plan tiers. */
+export type PlanTier = 'go' | 'goat' | 'pro' | 'max' | 'all'
+
+/** Plan tier order (Go < GOAT < Pro < Max). */
+export const PLAN_ORDER: Readonly<Record<string, number>> = {
+  go: 0,
+  goat: 1,
+  pro: 2,
+  max: 3,
+}
+
+/** Extract the lowest plan tier name from a `Min plan` catalog column (e.g. "Go and above" -> "go"). */
+export function minPlanTier(minPlan: string): string {
+  return minPlan.split(/\s+/)[0]?.toLowerCase() ?? 'go'
+}
+
+/** Whether a catalog row satisfies the requested plan tier. */
+export function isPlanSatisfied(entry: CatalogEntry | undefined, plan: PlanTier = 'go'): boolean {
+  if (entry === undefined) return false
+  const p = plan.toLowerCase() as PlanTier
+  if (p === 'all' || p === 'max') return true
+  const requiredRank = PLAN_ORDER[minPlanTier(entry.minPlan)] ?? 0
+  const userRank = PLAN_ORDER[p] ?? 0
+  return requiredRank <= userRank
+}
+
 /** One row of the official CLI catalog (`reference/models.md`). */
 export interface CatalogEntry {
   /** Lowest plan that includes the model, verbatim (`Go and above`, `Max`, …). */
@@ -84,7 +119,7 @@ export interface CatalogEntry {
 
 /** Whether a catalog row's `Min plan` column includes the Go plan. */
 export function isGoPlan(entry: CatalogEntry | undefined): boolean {
-  return entry?.minPlan.split(/\s+/)[0] === 'Go'
+  return isPlanSatisfied(entry, 'go')
 }
 
 /**
@@ -170,12 +205,21 @@ export async function fetchCatalog(
   return parseCatalog(await response.text())
 }
 
-/** Fetch the live listing and keep the models the catalog puts on the Go plan. */
-export async function fetchGoModels(
+/** Raw model record before plan filtering. */
+export interface RawModelRecord {
+  id: string
+  name: string
+  contextWindow: number
+  imageInput: boolean
+  entry?: CatalogEntry
+}
+
+/** Fetch raw models from /provider/v1/models combined with catalog entries. */
+export async function fetchRawModels(
   catalog: ReadonlyMap<string, CatalogEntry>,
   url: string = DEFAULT_MODELS_URL,
   fetchImpl: typeof fetch = fetch,
-): Promise<GoModel[]> {
+): Promise<RawModelRecord[]> {
   const response = await fetchImpl(url, {
     headers: { accept: 'application/json' },
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
@@ -187,25 +231,54 @@ export async function fetchGoModels(
   if (!isRecord(payload) || !Array.isArray(payload.data)) {
     throw new Error('Command Code models endpoint returned an unexpected shape')
   }
-  const models: GoModel[] = []
+  const records: RawModelRecord[] = []
   for (const raw of payload.data) {
     if (!isRecord(raw)) continue
     const id = nonEmptyString(raw.id)
-    const entry = id === undefined ? undefined : catalog.get(id)
-    if (id === undefined || !isGoPlan(entry)) continue
+    if (id === undefined) continue
+    const entry = catalog.get(id)
     const name = displayName(id, nonEmptyString(raw.name) ?? id.split('/').pop() ?? id)
     const contextWindow = positiveNumber(raw.context_length)
       ?? positiveNumber(raw.context_window)
       ?? FALLBACK_CONTEXT_WINDOW
-    models.push({
+    records.push({
       id,
       name,
       contextWindow,
       imageInput: imageCapable(id),
-      ...entry?.efforts === undefined ? {} : { efforts: entry.efforts },
+      ...entry === undefined ? {} : { entry },
     })
   }
-  // Stable order keeps the diff against a persisted catalog deterministic.
-  models.sort((a, b) => a.id.localeCompare(b.id))
+  records.sort((a, b) => a.id.localeCompare(b.id))
+  return records
+}
+
+/** Filter raw models by subscription plan tier. */
+export function filterModelsForPlan(
+  rawModels: readonly RawModelRecord[],
+  plan: PlanTier = 'go',
+): GoModel[] {
+  const models: GoModel[] = []
+  for (const raw of rawModels) {
+    if (!isPlanSatisfied(raw.entry, plan)) continue
+    models.push({
+      id: raw.id,
+      name: raw.name,
+      contextWindow: raw.contextWindow,
+      imageInput: raw.imageInput,
+      ...raw.entry?.efforts === undefined ? {} : { efforts: raw.entry.efforts },
+    })
+  }
   return models
+}
+
+/** Fetch the live listing and keep the models the catalog puts on the requested plan (defaults to 'go'). */
+export async function fetchGoModels(
+  catalog: ReadonlyMap<string, CatalogEntry>,
+  url: string = DEFAULT_MODELS_URL,
+  fetchImpl: typeof fetch = fetch,
+  plan: PlanTier = 'go',
+): Promise<GoModel[]> {
+  const records = await fetchRawModels(catalog, url, fetchImpl)
+  return filterModelsForPlan(records, plan)
 }

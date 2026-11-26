@@ -34,7 +34,19 @@ import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import { CommandCodeGoAdapter, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_REQUEST_IMAGE_BYTES, DEFAULT_MAX_TOKENS, DEFAULT_STREAM_IDLE_TIMEOUT_MS } from './adapter.js'
 import type { CommandCodeGoConnectionOptions, CommandCodeGoModel } from './adapter.js'
-import { fetchCatalog, fetchGoModels } from './models.js'
+import {
+  fetchCatalog,
+  fetchGoModels,
+  fetchRawModels,
+  filterModelsForPlan,
+  imageCapable,
+  isGoPlan,
+  isPlanSatisfied,
+  minPlanTier,
+  parseCatalog,
+  PLAN_ORDER,
+} from './models.js'
+import type { CatalogEntry, GoModel, PlanTier, RawModelRecord } from './models.js'
 
 export {
   CommandCodeGoAdapter,
@@ -44,8 +56,19 @@ export {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
 } from './adapter.js'
 export type { CommandCodeGoAdapterOptions, CommandCodeGoConnectionOptions, CommandCodeGoModel } from './adapter.js'
-export { fetchCatalog, fetchGoModels, imageCapable, isGoPlan, parseCatalog } from './models.js'
-export type { CatalogEntry, GoModel } from './models.js'
+export {
+  fetchCatalog,
+  fetchGoModels,
+  fetchRawModels,
+  filterModelsForPlan,
+  imageCapable,
+  isGoPlan,
+  isPlanSatisfied,
+  minPlanTier,
+  parseCatalog,
+  PLAN_ORDER,
+} from './models.js'
+export type { CatalogEntry, GoModel, PlanTier, RawModelRecord } from './models.js'
 export { chunkState } from './protocol.js'
 export type { ChunkState } from './protocol.js'
 
@@ -71,6 +94,8 @@ export interface AccountProfile {
   apiKeyEnv?: string
   /** Gateway base URL; defaults to the top-level `baseURL`. */
   baseURL?: string
+  /** Subscription plan tier used to filter models; defaults to top-level `plan` ('go'). */
+  plan?: PlanTier
   /** Default per-request output cap; defaults to the top-level `maxTokens`. */
   maxTokens?: number
   /** Positive context capacity used when the selected model has no exact value; defaults to the top-level value. */
@@ -92,6 +117,8 @@ export interface Config {
   apiKeyEnv?: string
   /** Gateway base URL; defaults to `https://api.commandcode.ai`. Also every account's default. */
   baseURL?: string
+  /** Subscription plan tier used to filter models ('go' | 'goat' | 'pro' | 'max' | 'all'); defaults to 'go'. */
+  plan?: PlanTier
   /** Default per-request output cap (default 64,000); explicit request values win. Also every account's default. */
   maxTokens?: number
   /** Positive context capacity used when the selected model has no exact value (default 1,000,000). Also every account's default. */
@@ -115,10 +142,13 @@ export interface Config {
   http1?: boolean
 }
 
+export const PlanSchema = z.union(['go', 'goat', 'pro', 'max', 'all'])
+
 export const AccountProfile: z<AccountProfile> = z.object({
   displayName: z.string(),
   apiKeyEnv: z.string().role('credential-ref'),
   baseURL: z.string(),
+  plan: PlanSchema,
   maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
   defaultContextWindow: z.number().step(1).min(1),
   maxRequestImageBytes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
@@ -129,6 +159,7 @@ export const Config = z.object({
   accounts: z.dict(AccountProfile).default({}).volatile(),
   apiKeyEnv: z.string().role('credential-ref').default(DEFAULT_API_KEY_ENV).volatile(),
   baseURL: z.string().default(DEFAULT_BASE_URL).volatile(),
+  plan: PlanSchema.default('go').volatile(),
   maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(DEFAULT_MAX_TOKENS).volatile(),
   defaultContextWindow: z.number().step(1).min(1).default(DEFAULT_CONTEXT_WINDOW).volatile(),
   maxRequestImageBytes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(DEFAULT_MAX_REQUEST_IMAGE_BYTES).volatile(),
@@ -153,6 +184,7 @@ function liveConfig(config: LiveConfig): Config {
     accounts: config.accounts.get(),
     apiKeyEnv: config.apiKeyEnv.get(),
     baseURL: config.baseURL.get(),
+    plan: config.plan.get(),
     maxTokens: config.maxTokens.get(),
     defaultContextWindow: config.defaultContextWindow.get(),
     maxRequestImageBytes: config.maxRequestImageBytes.get(),
@@ -176,36 +208,44 @@ function multiAccount(config: Config): boolean {
  * top-level fields are each account's shared defaults. Bounds are the
  * schema's job, so this only maps.
  */
-export function resolveAccounts(config: Config, scanned: readonly CommandCodeGoModel[]): ResolvedAccounts {
+export function resolveAccounts(
+  config: Config,
+  scanned: readonly CommandCodeGoModel[] | readonly RawModelRecord[],
+): ResolvedAccounts {
   const declared = Object.entries(config.accounts ?? {})
   const routes: readonly (readonly [string, AccountProfile | undefined])[] = declared.length === 0
     ? [[DEFAULT_PROVIDER, undefined]]
     : declared
-  return new Map(routes.map(([key, profile]) => [key, {
-    // The synthetic single account keeps the product label; a declared
-    // account falls back to its own key, like the official pi-ai adapter.
-    displayName: profile?.displayName ?? (profile === undefined ? DEFAULT_DISPLAY_NAME : key),
-    apiKeyEnv: credentialRef(profile?.apiKeyEnv ?? config.apiKeyEnv ?? DEFAULT_API_KEY_ENV),
-    baseURL: profile?.baseURL ?? config.baseURL ?? DEFAULT_BASE_URL,
-    maxTokens: profile?.maxTokens ?? config.maxTokens ?? DEFAULT_MAX_TOKENS,
-    defaultContextWindow: profile?.defaultContextWindow ?? config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
-    maxRequestImageBytes: profile?.maxRequestImageBytes ?? config.maxRequestImageBytes ?? DEFAULT_MAX_REQUEST_IMAGE_BYTES,
-    models: scanned,
-    retryPolicy: resolveRetryPolicy(profile?.retryPolicy ?? config.retryPolicy, 'commandcode-go-provider: retryPolicy'),
-    http1: config.http1 ?? false,
-  }]))
+  const hasRaw = Array.isArray(scanned) && scanned.length > 0 && 'entry' in (scanned[0] as object)
+  return new Map(routes.map(([key, profile]) => {
+    const plan = profile?.plan ?? config.plan ?? 'go'
+    const models = hasRaw
+      ? filterModelsForPlan(scanned as readonly RawModelRecord[], plan)
+      : scanned as readonly CommandCodeGoModel[]
+    return [key, {
+      displayName: profile?.displayName ?? (profile === undefined ? DEFAULT_DISPLAY_NAME : key),
+      apiKeyEnv: credentialRef(profile?.apiKeyEnv ?? config.apiKeyEnv ?? DEFAULT_API_KEY_ENV),
+      baseURL: profile?.baseURL ?? config.baseURL ?? DEFAULT_BASE_URL,
+      maxTokens: profile?.maxTokens ?? config.maxTokens ?? DEFAULT_MAX_TOKENS,
+      defaultContextWindow: profile?.defaultContextWindow ?? config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
+      maxRequestImageBytes: profile?.maxRequestImageBytes ?? config.maxRequestImageBytes ?? DEFAULT_MAX_REQUEST_IMAGE_BYTES,
+      models,
+      retryPolicy: resolveRetryPolicy(profile?.retryPolicy ?? config.retryPolicy, 'commandcode-go-provider: retryPolicy'),
+      http1: config.http1 ?? false,
+    }]
+  }))
 }
 
 export function apply(ctx: Context, config: LiveConfig): void {
   // The live-scanned catalog lives OUTSIDE the settings-backed config so a
   // scan cannot be clobbered by a settings snapshot; every account reads the
   // merged view through this thunk.
-  let scanned: CommandCodeGoModel[] = []
+  let scanned: RawModelRecord[] = []
   // The Loader owns this namespace, so the configuration form is addressed by
   // the profile entry id that mounted this plugin.
   const settingsNs = ctx.fiber.entry?.options.id ?? DEFAULT_SETTINGS_NS
   let lastRaw: Config | undefined
-  let lastScanned: readonly CommandCodeGoModel[] | undefined
+  let lastScanned: readonly RawModelRecord[] | undefined
   let memoized: ResolvedAccounts | undefined
   const accounts = (): ResolvedAccounts => {
     const raw = liveConfig(config)
@@ -339,19 +379,19 @@ export function apply(ctx: Context, config: LiveConfig): void {
     }
   })
 
-  /** Scan the Go catalog and swap it into the adapter's view. */
+  /** Scan the catalog and swap it into the adapter's view. */
   async function sync(): Promise<void> {
     // The official CLI catalog owns the two facts the Provider API withholds:
     // which plan each model belongs to, and which reasoning efforts it takes.
-    // Without it there is no honest Go filter, so a failed scan keeps the
+    // Without it there is no honest filter, so a failed scan keeps the
     // previous catalog instead of guessing plan membership.
-    const next = await fetchGoModels(await fetchCatalog())
+    const next = await fetchRawModels(await fetchCatalog())
     if (next.length === 0) {
-      throw new Error('no Go models found; keeping the previous catalog')
+      throw new Error('no models found; keeping the previous catalog')
     }
     if (deepEqualJson(next, scanned)) return
     scanned = next
-    ctx.logger.info('[commandcode-go-provider] synced %d Go model(s): %s', next.length, next.map(m => m.id).join(', '))
+    ctx.logger.info('[commandcode-go-provider] synced %d catalog model(s)', next.length)
   }
 
   void sync().catch((error: unknown) => {

@@ -26,10 +26,11 @@ import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm';
 import type { CommandCodeGoConnectionOptions, CommandCodeGoModel } from './adapter.js';
+import type { PlanTier, RawModelRecord } from './models.js';
 export { CommandCodeGoAdapter, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_REQUEST_IMAGE_BYTES, DEFAULT_MAX_TOKENS, DEFAULT_STREAM_IDLE_TIMEOUT_MS, } from './adapter.js';
 export type { CommandCodeGoAdapterOptions, CommandCodeGoConnectionOptions, CommandCodeGoModel } from './adapter.js';
-export { fetchCatalog, fetchGoModels, imageCapable, isGoPlan, parseCatalog } from './models.js';
-export type { CatalogEntry, GoModel } from './models.js';
+export { fetchCatalog, fetchGoModels, fetchRawModels, filterModelsForPlan, imageCapable, isGoPlan, isPlanSatisfied, minPlanTier, parseCatalog, PLAN_ORDER, } from './models.js';
+export type { CatalogEntry, GoModel, PlanTier, RawModelRecord } from './models.js';
 export { chunkState } from './protocol.js';
 export type { ChunkState } from './protocol.js';
 export declare const name = "commandcode-go-provider";
@@ -45,6 +46,8 @@ export interface AccountProfile {
     apiKeyEnv?: string;
     /** Gateway base URL; defaults to the top-level `baseURL`. */
     baseURL?: string;
+    /** Subscription plan tier used to filter models; defaults to top-level `plan` ('go'). */
+    plan?: PlanTier;
     /** Default per-request output cap; defaults to the top-level `maxTokens`. */
     maxTokens?: number;
     /** Positive context capacity used when the selected model has no exact value; defaults to the top-level value. */
@@ -65,6 +68,8 @@ export interface Config {
     apiKeyEnv?: string;
     /** Gateway base URL; defaults to `https://api.commandcode.ai`. Also every account's default. */
     baseURL?: string;
+    /** Subscription plan tier used to filter models ('go' | 'goat' | 'pro' | 'max' | 'all'); defaults to 'go'. */
+    plan?: PlanTier;
     /** Default per-request output cap (default 64,000); explicit request values win. Also every account's default. */
     maxTokens?: number;
     /** Positive context capacity used when the selected model has no exact value (default 1,000,000). Also every account's default. */
@@ -87,11 +92,13 @@ export interface Config {
      */
     http1?: boolean;
 }
+export declare const PlanSchema: z<"max" | "go" | "goat" | "pro" | "all", "max" | "go" | "goat" | "pro" | "all", "plain">;
 export declare const AccountProfile: z<AccountProfile>;
 export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     accounts: z<NoInfer<import("@deepseek-ai/cosmokit").Dict<AccountProfile, string>>, NoInfer<import("@deepseek-ai/cosmokit").Dict<AccountProfile, string>>, "volatile-defined">;
     apiKeyEnv: z<string, string, "volatile-defined">;
     baseURL: z<string, string, "volatile-defined">;
+    plan: z<"max" | "go" | "goat" | "pro" | "all", "max" | "go" | "goat" | "pro" | "all", "volatile-defined">;
     maxTokens: z<number, number, "volatile-defined">;
     defaultContextWindow: z<number, number, "volatile-defined">;
     maxRequestImageBytes: z<number, number, "volatile-defined">;
@@ -101,6 +108,7 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     accounts: z<NoInfer<import("@deepseek-ai/cosmokit").Dict<AccountProfile, string>>, NoInfer<import("@deepseek-ai/cosmokit").Dict<AccountProfile, string>>, "volatile-defined">;
     apiKeyEnv: z<string, string, "volatile-defined">;
     baseURL: z<string, string, "volatile-defined">;
+    plan: z<"max" | "go" | "goat" | "pro" | "all", "max" | "go" | "goat" | "pro" | "all", "volatile-defined">;
     maxTokens: z<number, number, "volatile-defined">;
     defaultContextWindow: z<number, number, "volatile-defined">;
     maxRequestImageBytes: z<number, number, "volatile-defined">;
@@ -122,5 +130,5 @@ export type ResolvedAccounts = Map<string, CommandCodeGoConnectionOptions>;
  * top-level fields are each account's shared defaults. Bounds are the
  * schema's job, so this only maps.
  */
-export declare function resolveAccounts(config: Config, scanned: readonly CommandCodeGoModel[]): ResolvedAccounts;
+export declare function resolveAccounts(config: Config, scanned: readonly CommandCodeGoModel[] | readonly RawModelRecord[]): ResolvedAccounts;
 export declare function apply(ctx: Context, config: LiveConfig): void;

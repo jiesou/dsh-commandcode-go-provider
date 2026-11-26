@@ -1,6 +1,6 @@
 {
   "name": "@jiesou/dsh-commandcode-go-provider",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "description": "Command Code Go provider adapter for dsh: scan the Go-plan model catalog dynamically and serve /alpha/generate through the harness LLM seam",
   "type": "module",
   "main": "lib/index.js",
@@ -52,7 +52,10 @@
     "compatibility": {
       "dsh": ">=0.2.0-rc.2 <0.3",
       "dshReleases": {
-        "0.2.0-rc.2": "compatible"
+        "0.2.0-rc.2": "compatible",
+        "0.2.2-rc.1": "compatible",
+        "0.2.2-rc.2": "compatible",
+        "0.2.2-rc.5": "compatible"
       },
       "profiles": [
         "web",
@@ -61,27 +64,31 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": ">=4.0.1 <5",
-    "@deepseek-ai/cordis-plugin-loader": "~1.0.5",
+    "@deepseek-ai/cordis": ">=4.1.0 <5",
+    "@deepseek-ai/cordis-plugin-loader": ">=1.1.0 <2",
     "@deepseek-ai/dsh-attachment": ">=0.2.0-rc.2 <0.3",
     "@deepseek-ai/dsh-credentials": ">=0.2.0-rc.2 <0.3",
     "@deepseek-ai/dsh-launch-environment": ">=0.2.0-rc.2 <0.3",
     "@deepseek-ai/dsh-llm": ">=0.2.0-rc.2 <0.3",
     "@deepseek-ai/dsh-timeout": ">=0.2.0-rc.2 <0.3",
     "@deepseek-ai/dsh-util-values": ">=0.2.0-rc.2 <0.3",
-    "@deepseek-ai/schemastery": "^3.18.3"
+    "@deepseek-ai/schemastery": "^3.18.3 || ^3.19.0"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "~4.0.4",
-    "@deepseek-ai/cordis-plugin-loader": "~1.0.5",
-    "@deepseek-ai/dsh-attachment": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-credentials": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-launch-environment": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-timeout": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-util-values": "0.2.0-rc.2",
+    "@deepseek-ai/cordis": "~4.1.0",
+    "@deepseek-ai/cordis-plugin-loader": "~1.1.0",
+    "@deepseek-ai/cosmokit": "^1.9.0",
+    "@deepseek-ai/dsh-attachment": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-brand": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-credentials": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-error": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-launch-environment": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-timeout": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-util-values": "0.2.2-rc.2",
     "@deepseek-ai/schemastery": "^3.18.4",
     "@types/node": "^22.20.1",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "undici": "^8.12.1"
   }
 }

@@ -29,6 +29,14 @@ export interface GoModel {
 }
 /** Whether a model id accepts image input under the official CLI's classification. */
 export declare function imageCapable(id: string): boolean;
+/** Supported subscription plan tiers. */
+export type PlanTier = 'go' | 'goat' | 'pro' | 'max' | 'all';
+/** Plan tier order (Go < GOAT < Pro < Max). */
+export declare const PLAN_ORDER: Readonly<Record<string, number>>;
+/** Extract the lowest plan tier name from a `Min plan` catalog column (e.g. "Go and above" -> "go"). */
+export declare function minPlanTier(minPlan: string): string;
+/** Whether a catalog row satisfies the requested plan tier. */
+export declare function isPlanSatisfied(entry: CatalogEntry | undefined, plan?: PlanTier): boolean;
 /** One row of the official CLI catalog (`reference/models.md`). */
 export interface CatalogEntry {
     /** Lowest plan that includes the model, verbatim (`Go and above`, `Max`, …). */
@@ -49,5 +57,17 @@ export declare function displayName(id: string, name: string): string;
 export declare function parseCatalog(markdown: string): Map<string, CatalogEntry>;
 /** Fetch the official CLI catalog: per-model plan membership and reasoning efforts. */
 export declare function fetchCatalog(url?: string, fetchImpl?: typeof fetch): Promise<Map<string, CatalogEntry>>;
-/** Fetch the live listing and keep the models the catalog puts on the Go plan. */
-export declare function fetchGoModels(catalog: ReadonlyMap<string, CatalogEntry>, url?: string, fetchImpl?: typeof fetch): Promise<GoModel[]>;
+/** Raw model record before plan filtering. */
+export interface RawModelRecord {
+    id: string;
+    name: string;
+    contextWindow: number;
+    imageInput: boolean;
+    entry?: CatalogEntry;
+}
+/** Fetch raw models from /provider/v1/models combined with catalog entries. */
+export declare function fetchRawModels(catalog: ReadonlyMap<string, CatalogEntry>, url?: string, fetchImpl?: typeof fetch): Promise<RawModelRecord[]>;
+/** Filter raw models by subscription plan tier. */
+export declare function filterModelsForPlan(rawModels: readonly RawModelRecord[], plan?: PlanTier): GoModel[];
+/** Fetch the live listing and keep the models the catalog puts on the requested plan (defaults to 'go'). */
+export declare function fetchGoModels(catalog: ReadonlyMap<string, CatalogEntry>, url?: string, fetchImpl?: typeof fetch, plan?: PlanTier): Promise<GoModel[]>;

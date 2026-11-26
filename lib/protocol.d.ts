@@ -26,7 +26,7 @@ import type { ImageAttachmentRef, RequestImageAttachment } from '@deepseek-ai/ds
  * tracks the published CLI rather than a release we happened to test against:
  * this is what `command-code@latest` ships.
  */
-export declare const CC_VERSION = "1.74.0";
+export declare const CC_VERSION = "1.93.4";
 /** Last-resort output cap when a request carries no maxTokens (matches the adapter default). */
 export declare const DEFAULT_MAX_TOKENS = 64000;
 /**

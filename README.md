@@ -48,6 +48,7 @@ echo 'COMMANDCODE_API_KEY: [your key, be like user_xxxx]' >> ~/.dsh/.credentials
   config:
     apiKeyEnv: COMMANDCODE_API_KEY
     baseURL: https://api.commandcode.ai
+    plan: go
     maxTokens: 64000
     defaultContextWindow: 1000000
     maxRequestImageBytes: 2097152
@@ -57,6 +58,7 @@ echo 'COMMANDCODE_API_KEY: [your key, be like user_xxxx]' >> ~/.dsh/.credentials
 | --- | --- | --- | --- |
 | `apiKeyEnv` | `string` | `"COMMANDCODE_API_KEY"` | 读取 API Key 的环境变量名（或 credential ref） |
 | `baseURL` | `string` | `"https://api.commandcode.ai"` | Command Code 网关 base URL，`/alpha/generate` 自动追加 |
+| `plan` | `string` | `"go"` | 订阅套餐档位（`go` / `goat` / `pro` / `max` / `all`），根据官方 catalog 的 `Min plan` 阶梯筛选可用模型 |
 | `maxTokens` | `number` | `64000` | 单次请求输出 token 上限 |
 | `defaultContextWindow` | `number` | `1000000` | 模型无精确 contextWindow 时的兜底值 |
 | `maxRequestImageBytes` | `number` | `2097152`（2 MiB） | 单次请求允许内联的 base64 图片字节上限 |
@@ -75,9 +77,11 @@ echo 'COMMANDCODE_API_KEY: [your key, be like user_xxxx]' >> ~/.dsh/.credentials
       commandcode-1:
         displayName: Command Code Go 1
         apiKeyEnv: COMMANDCODE_API_KEY
+        plan: go
       commandcode-2:
-        displayName: Command Code Go 2
+        displayName: Command Code Pro 2
         apiKeyEnv: COMMANDCODE_API_KEY_2
+        plan: pro
     baseURL: https://api.commandcode.ai
     retryPolicy:
       mode: always
@@ -88,6 +92,7 @@ echo 'COMMANDCODE_API_KEY: [your key, be like user_xxxx]' >> ~/.dsh/.credentials
 | `displayName` | `string` | 账号 key | 模型选择器里的显示名 |
 | `apiKeyEnv` | `string` | 顶层 `apiKeyEnv` | 该账号的 credential ref，在 Web Models 页对应账号卡片里写入 |
 | `baseURL` | `string` | 顶层 `baseURL` | 覆盖该账号的网关地址 |
+| `plan` | `string` | 顶层 `plan` | 覆盖该账号的套餐档位（`go` / `goat` / `pro` / `max` / `all`） |
 | `maxTokens` | `number` | 顶层 `maxTokens` | 覆盖该账号的输出上限 |
 | `defaultContextWindow` | `number` | 顶层 `defaultContextWindow` | 覆盖该账号的兜底容量 |
 | `maxRequestImageBytes` | `number` | 顶层 `maxRequestImageBytes` | 覆盖该账号的图片字节上限 |
@@ -109,15 +114,14 @@ Reasoning effort 不需要配置：档位来自官方 CLI catalog，模型只暴
 
 ## 兼容性
 
-声明在 `package.json` 的 `dsh.compatibility`：DSH `>=0.1.7-alpha.1 <0.2.0`，Node.js `^22.19.0 || >=24.0.0`，Profile `web` / `headless`。
-
-`>=0.1.7-alpha.1` 是硬下限，不是偏好：该版本起 dsh-llm 把工具结果改成独立的 `role: 'tool'` 消息（`toolCallId` 移到消息层），并重写了 dsh-settings 的表单模型（`installSection` 被 `SettingsForms` 取代、配置字段需标记 `volatile()` 才会出现在设置页）。本插件按新模型实现，0.1.6 及更早的 `role: 'user'` + `tool-result` block 形态不再支持。
+声明在 `package.json` 的 `dsh.compatibility`：DSH `>=0.2.0-rc.2 <0.3`，Node.js `^22.19.0 || >=24.0.0`，Profile `web` / `headless`。
 
 逐版本证据（每个版本都用 `dsh plugin add <tarball>` 装进一次性 Profile，冷启动到发出真实请求，再卸载）：
 
 | DSH 版本 | 安装 | 启动 | 卸载 |
 | --- | --- | --- | --- |
-| 0.1.7-rc.2 | 通过 | 通过 | 通过 |
+| 0.2.0-rc.2 | 通过 | 通过 | 通过 |
+| 0.2.2-rc.2 | 通过 | 通过 | 通过 |
 
 0.1.7-alpha.1 / alpha.2 / rc.1 满足声明下限，但未逐版本实测。
 
